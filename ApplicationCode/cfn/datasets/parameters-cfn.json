@@ -1,0 +1,18 @@
+[
+    {
+        "ParameterKey": "pTeamName",
+        "ParameterValue": "engineering"
+    },
+    {
+        "ParameterKey": "pPipelineName",
+        "ParameterValue": "test"
+    },
+    {
+        "ParameterKey": "pDatasetName",
+        "ParameterValue": "meteorites"
+    },
+    {
+        "ParameterKey": "pEnv",
+        "ParameterValue": "dev"
+    }
+]

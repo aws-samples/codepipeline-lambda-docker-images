@@ -1,0 +1,10 @@
+{
+    "Parameters" : {
+      "pEnvironment" : "dev",
+      "pOrganizationName" : "aws",
+      "pApplicationName" : "datalake",
+      "pNumBuckets" : "3",
+      "pEcrImageTag": "latest",
+      "pPrefix": "dev"
+    }
+}

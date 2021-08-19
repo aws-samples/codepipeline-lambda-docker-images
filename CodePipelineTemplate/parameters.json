@@ -1,0 +1,8 @@
+{
+    "Parameters" : {
+      "pAppCodeCommitRepositoryName" : "AppCode",
+      "pCommonLayerCodeCommitRepository" : "CommonLayerCode",
+      "pBranchName" : "main",
+      "pPrefix": "dev"
+    }
+}

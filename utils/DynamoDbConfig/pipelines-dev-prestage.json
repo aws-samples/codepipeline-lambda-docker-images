@@ -1,0 +1,32 @@
+{
+  "description": "Main Pipeline to Ingest Data",
+  "ingestion_frequency": "WEEKLY",
+  "last_execution_date": "2020-03-11",
+  "last_execution_duration_in_seconds": 2.215,
+  "last_execution_id": "96024327-6f65-43bd-8181-87bef97882ff",
+  "last_execution_status": "COMPLETED",
+  "last_execution_timestamp": "2020-03-11T02:52:06.630Z",
+  "last_updated_timestamp": "2020-03-11T02:52:06.630Z",
+  "modules": [
+    {
+      "name": "pandas",
+      "version": "0.24.2"
+    },
+    {
+      "name": "Python",
+      "version": "3.7"
+    }
+  ],
+  "name": "engineering-main-pre-stage",
+  "owner": "Yuri Gagarin",
+  "owner_contact": "y.gagarin@",
+  "status": "ACTIVE",
+  "tags": [
+    {
+      "key": "org",
+      "value": "VOSTOK"
+    }
+  ],
+  "type": "INGESTION",
+  "version": 230
+}

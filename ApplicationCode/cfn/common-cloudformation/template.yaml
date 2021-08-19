@@ -1,0 +1,615 @@
+#  Copyright Amazon.com, Inc. and its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT
+#  
+#  Licensed under the MIT License. See the LICENSE accompanying this file
+#  for the specific language governing permissions and limitations under
+#  the License.
+
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: "AWS::Serverless-2016-10-31"
+Description: "Resources to be created by the common stack"
+Parameters:
+  pEnvironment:
+    Description: "Environment name."
+    Type: String
+    Default: "dev"
+    AllowedValues: ["dev", "test", "prod"]
+  pOrganizationName:
+    Description: "Name of the organization (all lowercase, no symbols or spaces)"
+    Type: String
+    AllowedPattern: "[a-z0-9]{2,16}"
+  pApplicationName:
+    Description: "Name of the application (all lowercase, no symbols or spaces)"
+    Type: String
+    AllowedPattern: "[a-z0-9]{2,10}"
+    Default: "datalake"
+  pNumBuckets:
+    Description: "Number of data lake buckets (3 or 1)"
+    Default: "3"
+    Type: String
+    AllowedValues: ["3", "1"]
+    ConstraintDescription: "Must specify 3 or 1"
+  pEcrImageTag:
+    Description: "ECR Image Tag"
+    Type: String
+    Default: "latest"
+  pPrefix:
+    Description: Common prefix for resource naming
+    Type: String
+    Default: dev
+    AllowedValues: ["dev", "stg", "prod"]
+
+
+Conditions:
+  CreateMultipleBuckets: !Equals [!Ref pNumBuckets, "3"]
+  CreateSingleBucket: !Equals [!Ref pNumBuckets, "1"]
+
+
+Resources:
+  ###### S3 #########
+  rCentralBucket:
+    Type: "AWS::S3::Bucket"
+    Condition: CreateSingleBucket
+    DependsOn: rQueuePolicy
+    Properties:
+      BucketName: !Join ['-', ['sdlf', !Ref pOrganizationName, !Ref pApplicationName, !Ref pEnvironment, !Ref 'AWS::Region', !Ref 'AWS::AccountId']]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: raw/
+            Queue: !GetAtt rQueueRouting.Arn
+      Tags:
+        -
+          Key: 'tagging-policy'
+          Value: !Join ['-', [!Ref pOrganizationName, !Ref pApplicationName, !Ref pEnvironment, "common"]]
+
+  rRawBucket:
+    Type: "AWS::S3::Bucket"
+    Condition: CreateMultipleBuckets
+    DependsOn: rQueuePolicy
+    Properties:
+      BucketName: !Join ['-', ['sdlf', !Ref pOrganizationName, !Ref pApplicationName, !Ref pEnvironment, !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'raw']]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Queue: !GetAtt rQueueRouting.Arn
+      Tags:
+        -
+          Key: 'tagging-policy'
+          Value: !Join ['-', [!Ref pOrganizationName, !Ref pApplicationName, !Ref pEnvironment, "common"]]
+
+  rStageBucket:
+    Type: "AWS::S3::Bucket"
+    Condition: CreateMultipleBuckets
+    Properties:
+      BucketName: !Join ['-', ['sdlf', !Ref pOrganizationName, !Ref pApplicationName, !Ref pEnvironment, !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'stage']]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        -
+          Key: 'tagging-policy'
+          Value: !Join ['-', [!Ref pOrganizationName, !Ref pApplicationName, !Ref pEnvironment, "common"]]
+
+  rAnalyticsBucket:
+    Type: "AWS::S3::Bucket"
+    Condition: CreateMultipleBuckets
+    Properties:
+      BucketName: !Join ['-', ['sdlf', !Ref pOrganizationName, !Ref pApplicationName, !Ref pEnvironment, !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'analytics']]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        -
+          Key: 'tagging-policy'
+          Value: !Join ['-', [!Ref pOrganizationName, !Ref pApplicationName, !Ref pEnvironment, "common"]]
+
+  rQueueRouting:
+    Type: "AWS::SQS::Queue"
+    Properties:
+      QueueName:
+        !Join [
+          "-",
+          [
+            "sdlf",
+            !Ref pOrganizationName,
+            !Ref pApplicationName,
+            !Ref pEnvironment,
+            "routing",
+            "queue",
+          ],
+        ]
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt rDeadLetterQueueRouting.Arn
+        maxReceiveCount: 1
+      VisibilityTimeout: 60
+      # KmsMasterKeyId: !GetAtt rIamStack.Outputs.oInfrastructureKMSKey
+
+  rDeadLetterQueueRouting:
+    Type: "AWS::SQS::Queue"
+    Properties:
+      QueueName:
+        !Join [
+          "-",
+          [
+            "sdlf",
+            !Ref pOrganizationName,
+            !Ref pApplicationName,
+            !Ref pEnvironment,
+            "routing",
+            "dlq",
+          ],
+        ]
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 60
+      # KmsMasterKeyId: !GetAtt rIamStack.Outputs.oInfrastructureKMSKey
+
+  rQueueLambdaEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 10
+      Enabled: True
+      EventSourceArn: !GetAtt rQueueRouting.Arn
+      FunctionName: !GetAtt rLambdaRouting.Arn
+
+  rLambdaRouting:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      PackageType: Image
+      ImageUri: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${pPrefix}-routing-lambda:${pEcrImageTag}"
+      FunctionName:
+        !Join [
+          "-",
+          [
+            "sdlf",
+            !Ref pOrganizationName,
+            !Ref pApplicationName,
+            !Ref pEnvironment,
+            "routing",
+          ],
+        ]
+      Environment:
+        Variables:
+          ACCOUNT_ID: !Ref "AWS::AccountId"
+          ORG: !Ref pOrganizationName
+          APP: !Ref pApplicationName
+          ENV: !Ref pEnvironment
+          NUM_BUCKETS: !Ref pNumBuckets
+      Description: "Routes S3 PutObject Logs to the relevant Stage A Queue"
+      MemorySize: 256
+      Timeout: 60
+      Role: !GetAtt rRoleLambdaExecutionRouting.Arn
+
+  rLambdaRedrive:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      PackageType: Image
+      ImageUri: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${pPrefix}-redrive-lambda:${pEcrImageTag}"
+      FunctionName:
+        !Join [
+          "-",
+          [
+            "sdlf",
+            !Ref pOrganizationName,
+            !Ref pApplicationName,
+            !Ref pEnvironment,
+            "redrive",
+          ],
+        ]
+      Environment:
+        Variables:
+          QUEUE: !Select ["5", !Split [":", !GetAtt rQueueRouting.Arn]]
+          DLQ: !Select ["5", !Split [":", !GetAtt rDeadLetterQueueRouting.Arn]]
+      Description: "Redrives Failed S3 PutObject Logs to the routing queue"
+      MemorySize: 256
+      Timeout: 300
+      Role: !GetAtt rRoleLambdaExecutionRouting.Arn
+      # KmsKeyArn: !GetAtt rIamStack.Outputs.oInfrastructureKMSKey
+
+  ######## IAM #########
+  rQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: "*"
+            Action:
+              - SQS:SendMessage
+            Resource: !GetAtt rQueueRouting.Arn
+            Condition:
+              StringEquals:
+                aws:SourceArn: !If [CreateMultipleBuckets,
+                      !Join [':', ['arn:aws:s3::', !Join ['-', ['sdlf', !Ref pOrganizationName, !Ref pApplicationName, !Ref pEnvironment, !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'raw']]]],
+                      !Join [':', ['arn:aws:s3::', !Join ['-', ['sdlf', !Ref pOrganizationName, !Ref pApplicationName, !Ref pEnvironment, !Ref 'AWS::Region', !Ref 'AWS::AccountId']]]]
+                      ]
+      Queues:
+        - !Ref rQueueRouting
+
+  ######## DYNAMODB #########
+  octagondatasets:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      SSESpecification:
+        SSEEnabled: "true"
+        SSEType: KMS
+        # KMSMasterKeyId: !Ref pKmsKeyArn
+      KeySchema:
+        - AttributeName: name
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: name
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      TableName: !Sub "octagon-Datasets-${pEnvironment}"
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+
+  rDynamoObjectMetadata:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      SSESpecification:
+        # KMSMasterKeyId: !Ref pKmsKeyArn
+        SSEEnabled: "true"
+        SSEType: KMS
+      BillingMode: PAY_PER_REQUEST
+      TableName: !Sub "octagon-ObjectMetadata-${pEnvironment}"
+      AttributeDefinitions:
+        - AttributeName: "id"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "id"
+          KeyType: "HASH"
+
+  octagonpipelineexecutionhistory:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      SSESpecification:
+        SSEEnabled: "true"
+        SSEType: KMS
+        # KMSMasterKeyId: !Ref pKmsKeyArn
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: pipeline
+          AttributeType: S
+        - AttributeName: last_updated_timestamp
+          AttributeType: S
+        - AttributeName: execution_date
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: status_last_updated_timestamp
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      GlobalSecondaryIndexes:
+        - IndexName: pipeline-last-updated-index
+          KeySchema:
+            - AttributeName: pipeline
+              KeyType: HASH
+            - AttributeName: last_updated_timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: execution_date-status-index
+          KeySchema:
+            - AttributeName: execution_date
+              KeyType: HASH
+            - AttributeName: status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: pipeline-execution_date-index
+          KeySchema:
+            - AttributeName: pipeline
+              KeyType: HASH
+            - AttributeName: execution_date
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: execution_date-last_updated-index
+          KeySchema:
+            - AttributeName: execution_date
+              KeyType: HASH
+            - AttributeName: last_updated_timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: status-last_updated-index
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: last_updated_timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: pipeline-status_last_updated-index
+          KeySchema:
+            - AttributeName: pipeline
+              KeyType: HASH
+            - AttributeName: status_last_updated_timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TableName: !Sub "octagon-PipelineExecutionHistory-${pEnvironment}"
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+
+  octagonpipelines:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      SSESpecification:
+        SSEEnabled: "true"
+        SSEType: KMS
+        # KMSMasterKeyId: !Ref pKmsKeyArn
+      KeySchema:
+        - AttributeName: name
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: name
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      TableName: !Sub "octagon-Pipelines-${pEnvironment}"
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+
+  rRoleLambdaExecutionRouting:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "sdlf-${pOrganizationName}-${pApplicationName}-routinglambda-svc-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: /
+      # ManagedPolicyArns:
+      #   - !Ref rQueueRoutingLambdaPolicy
+      Tags: 
+        -
+          Key: 'tagging-policy'
+          Value: !Join ['-', [!Ref pOrganizationName, !Ref pApplicationName, !Ref pEnvironment, "common"]]
+
+  rQueueRoutingLambdaPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: !Sub "sdlf-${pOrganizationName}-${pApplicationName}-queueroutinglambda-policy"
+      Roles:
+        - !Ref rRoleLambdaExecutionRouting
+      Description: Policy with permissions for routing Lambda
+      Path: /
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+          - Effect: Allow
+            Action:
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/sdlf-*:*"
+          - Effect: Allow
+            Action:
+              - "sqs:List*" 
+              - "sqs:ReceiveMessage"
+              - "sqs:SendMessage*"
+              - "sqs:DeleteMessage*"
+              - "sqs:GetQueue*"
+            Resource: 
+              - !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:sdlf-*"
+          - Effect: Allow
+            Action:
+              - "dynamodb:Get*"
+              - "dynamodb:Query"
+              - "dynamodb:Scan"
+            Resource: 
+              - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/octagon-*"
+          # Circular dependency to rKMSKey
+          - Effect: Allow
+            Action:
+              - "kms:Encrypt"
+              - "kms:Decrypt"
+            Resource: 
+              - !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+              # - !GetAtt rKMSKey.Arn
+
+  rStatesExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "sdlf-${pOrganizationName}-${pApplicationName}-statesexecution-svc-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - !Sub "states.${AWS::Region}.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - !Ref rStatesExecutionPolicy
+      Tags: 
+        -
+          Key: 'tagging-policy'
+          Value: !Join ['-', [!Ref pOrganizationName, !Ref pApplicationName, !Ref pEnvironment, "common"]]
+
+  rStatesExecutionPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: !Sub "sdlf-${pOrganizationName}-${pApplicationName}-statesexecution-policy"
+      Description: Policy with permissions to trigger State Machine
+      Path: /
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+              - Effect: Allow
+                Action:
+                  - "lambda:InvokeFunction"
+                Resource: 
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:*"
+  
+  rRoleCloudWatchEvent:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "sdlf-${pOrganizationName}-${pApplicationName}-cloudwatchevent-svc-role"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: "sts:AssumeRole"
+            Principal:
+              Service: events.amazonaws.com
+        Version: "2012-10-17"
+      Path: /
+      ManagedPolicyArns:
+        - !Ref rTriggerLambdaPolicy
+      Tags: 
+        -
+          Key: 'tagging-role'
+          Value: !Join ['-', [!Ref pOrganizationName, !Ref pApplicationName, !Ref pEnvironment, "common"]]
+  
+  rTriggerLambdaPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: !Sub "sdlf-${pOrganizationName}-${pApplicationName}-triggerlambda-policy"
+      Description: Policy with permissions to trigger Lambda
+      Path: /
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - "lambda:ListFunctions"
+              - "lambda:InvokeFunction"
+            Resource:
+              - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:*"
+          # Read only
+          - Effect: Allow
+            Action:
+              - "states:ListStateMachines"
+            Resource: "*"
+          - Effect: Allow
+            Action:
+                - "states:DescribeStateMachineForExecution"
+                - "states:DescribeStateMachine"                    
+                - "states:StartExecution"
+            Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:*"
+          - Effect: Allow
+            Action:
+              - "s3:GetObject"
+              - "s3:GetObjectVersion"
+              - "s3:GetBucketVersioning"
+              - "s3:ListBucket"
+            Resource: !Sub "arn:aws:s3:::${pOrganizationName}-${pApplicationName}-${pEnvironment}*"
+
+
+  ######## SSM OUTPUTS #########
+  rOrganizationSsm:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "/DataLake/Misc/pOrg"
+      Type: "String"
+      Value: !Ref pOrganizationName
+      Description: "Name of the Organization owning the datalake"
+  rApplicationSsm:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "/DataLake/Misc/pApp"
+      Type: "String"
+      Value: !Ref pApplicationName
+      Description: "Name of the Application"
+  rS3CentralBucketSsm:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "/DataLake/S3/CentralBucket"
+      Type: "String"
+      Value: !If [CreateMultipleBuckets, !Ref rRawBucket, !Ref rCentralBucket]
+      Description: "Name of the Central S3 bucket"
+  rS3StageBucketSsm:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "/DataLake/S3/StageBucket"
+      Type: "String"
+      Value: !If [CreateMultipleBuckets, !Ref rStageBucket, !Ref rCentralBucket]
+      Description: "Name of the Stage S3 bucket"
+  rS3AnalyticsBucketSsm:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "/DataLake/S3/AnalyticsBucket"
+      Type: "String"
+      Value: !If [CreateMultipleBuckets, !Ref rAnalyticsBucket, !Ref rCentralBucket]
+      Description: "Name of the Analytics S3 bucket"
+  # Key Used across framework for meta data
+  rQueueRoutingSsm:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "/DataLake/SQS/QueueRouting"
+      Type: "String"
+      Value: !Ref rQueueRouting
+      Description: "URL of routing queue"
+  rDeadLetterQueueRoutingSsm:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "/DataLake/SQS/DeadLetterQueueRouting"
+      Type: "String"
+      Value: !Ref rDeadLetterQueueRouting
+      Description: "URL of dead letter routing queue"
+  rStateMachineRoleArnSsm: 
+    Type: "AWS::SSM::Parameter" 
+    Properties: 
+      Name: "/DataLake/IAM/StateMachineRoleArn" 
+      Type: "String" 
+      Value: !GetAtt rStatesExecutionRole.Arn
+      Description: "ARN of the Role that state machines use for execution"
+  rDynamoObjectMetadataSsm:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "/DataLake/Dynamo/ObjectCatalog"
+      Type: "String"
+      Value: !Ref rDynamoObjectMetadata
+      Description: "Name of the DynamoDB used to store metadata"
+  rDynamoTransformMappingSsm:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "/DataLake/Dynamo/TransformMapping"
+      Type: "String"
+      Value: !Sub "octagon-Datasets-${pEnvironment}"
+      Description: "Name of the DynamoDB used to store mappings to transformation"
+
+Outputs:
+  oCentralBucket:
+    Value: !If [CreateMultipleBuckets, !Ref rRawBucket, !Ref rCentralBucket]
+    Description: "Data Lake Ingestion Bucket"
+  oStageBucket:
+    Value: !Ref rStageBucket
+    Condition: CreateMultipleBuckets
+    Description: "Data Lake Stage Bucket"
+  oAnalyticsBucket:
+    Value: !Ref rAnalyticsBucket
+    Condition: CreateMultipleBuckets
+    Description: "Data Lake Analytics Bucket"

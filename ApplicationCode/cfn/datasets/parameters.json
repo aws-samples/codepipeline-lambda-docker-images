@@ -1,0 +1,9 @@
+{
+    "Parameters" : {
+      "pTeamName" : "engineering",
+      "pPipelineName" : "main1",
+      "pDatasetName" : "meteorites",
+      "pEnv" : "dev",
+      "pEcrImageTag": "latest"
+    }
+}

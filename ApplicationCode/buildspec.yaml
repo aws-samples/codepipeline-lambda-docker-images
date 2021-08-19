@@ -1,0 +1,14 @@
+version: 0.2
+phases:
+  install:
+    runtime-versions:
+      docker: 19
+    commands:
+      - uname -a
+      - set -e
+      - chmod +x ./build.sh
+      - ./build.sh
+artifacts:
+  files:
+    - cfn/**/*
+  name: builds/$CODEBUILD_BUILD_NUMBER/cfn-artifacts

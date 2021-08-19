@@ -1,0 +1,424 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: "AWS::Serverless-2016-10-31"
+Description: "Contains all the resources necessary for a single dataset"
+
+Parameters:
+  pTeamName:
+    Description: "Name of the team owning the pipeline (all lowercase, no symbols or spaces)"
+    Type: String
+    AllowedPattern: "[a-z0-9]*"
+  pPipelineName:
+    Description: "The name of the pipeline (all lowercase, no symbols or spaces)"
+    Type: String
+    AllowedPattern: "[a-z0-9]*"
+  pDatasetName:
+    Description: "The name of the dataset (all lowercase, no symbols or spaces)"
+    Type: String
+    AllowedPattern: "[a-z0-9]{2,10}"
+  pEnv:
+    Description: "The name of the environment to deploy the dataset to"
+    Type: String
+    Default: "dev"
+    AllowedValues: [dev, test, prod]
+  pOrg:
+    Description: "Name of the organization owning the datalake"
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: "/DataLake/Misc/pOrg"
+  pApp:
+    Description: "Name of the application"
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: "/DataLake/Misc/pApp"
+  pBronzeBucket:
+    Description: "The central bucket for the solution"
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: "/DataLake/S3/CentralBucket"
+  pSilverBucket:
+    Description: "The stage bucket for the solution"
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: "/DataLake/S3/StageBucket"
+  pGoldBucket:
+    Description: "The analytics bucket for the solution"
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: "/DataLake/S3/AnalyticsBucket"
+  pEcrImageTag:
+    Description: "ECR Image Tag"
+    Type: String
+    Default: "latest"
+  # pGlueCatalogKmsKeyPolicyArn:
+  #   Description: "ARN of the Data Lake Crawler Role"
+  #   Type: "AWS::SSM::Parameter::Value<String>"
+  #   Default: "/DataLake/IAM/GlueCatalogKmsPolicyArn"
+  # pDataAccessDomain:
+  #   Description: "Team KMS Key"
+  #   Type: "AWS::SSM::Parameter::Value<String>"
+
+Resources:
+  ######## SQS #########
+  rQueueRoutingPostStep:
+    Type: "AWS::SQS::Queue"
+    Properties:
+      QueueName: !Join [
+          "-",
+          [
+            "sdlf",
+            !Ref pTeamName,
+            !Ref pDatasetName,
+            !Ref pPipelineName,
+            !Ref pOrg,
+            !Ref pApp,
+            !Ref pEnv,
+            # !Ref pTeamName,
+            # !Ref pDatasetName,
+            "queue-b.fifo",
+          ],
+        ]
+      FifoQueue: True
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt rDeadLetterQueueRoutingPostStep.Arn
+        maxReceiveCount: 1
+      VisibilityTimeout: 60
+  rDeadLetterQueueRoutingPostStep:
+    Type: "AWS::SQS::Queue"
+    Properties:
+      QueueName: !Join [
+          "-",
+          [
+            "sdlf",
+            !Ref pTeamName,
+            !Ref pDatasetName,
+            !Ref pPipelineName,
+            !Ref pOrg,
+            !Ref pApp,
+            !Ref pEnv,
+            # !Ref pTeamName,
+            # !Ref pDatasetName,
+            "dlq-b.fifo",
+          ],
+        ]
+      FifoQueue: True
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 60
+
+  ######## TRIGGERS #########
+  rPostStateRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Name: !Join [
+          "-",
+          [
+            "sdlf",
+            !Ref pTeamName,
+            !Ref pPipelineName,
+            !Ref pDatasetName,
+            !Ref pOrg,
+            !Ref pApp,
+            !Ref pEnv,
+            # !Ref pTeamName,
+            # !Ref pDatasetName,
+            "rule-b",
+          ],
+        ]
+      Description: Triggers Post-Stage Routing Lambda every 5 minutes
+      State: ENABLED
+      ScheduleExpression: "cron(*/5 * * * ? *)"
+      Targets:
+        - Id: !Sub ${AWS::StackName}-Post-Target
+          Arn: !Join [
+              ":",
+              [
+                "arn:aws:lambda",
+                !Ref "AWS::Region",
+                !Ref "AWS::AccountId",
+                "function",
+                !Join [
+                  "-",
+                  [
+                    "sdlf",
+                    !Ref pTeamName,
+                    !Ref pPipelineName,
+                    !Ref pOrg,
+                    !Ref pApp,
+                    !Ref pEnv,
+                    # !Ref pTeamName,
+                    # !Ref pPipelineName,
+                    "routing-b",
+                  ],
+                ],
+              ],
+            ]
+          Input: !Sub |
+            {
+              "team": "${pTeamName}",
+              "pipeline": "${pPipelineName}",
+              "dataset": "${pDatasetName}"
+            }
+  rPermissionEventsInvokeRoutingLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Join [
+          "-",
+          [
+            "sdlf",
+            !Ref pTeamName,
+            !Ref pPipelineName,
+            !Ref pOrg,
+            !Ref pApp,
+            !Ref pEnv,
+            # !Ref pTeamName,
+            # !Ref pPipelineName,
+            "routing-b",
+          ],
+        ]
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt rPostStateRule.Arn
+
+  ######## GLUE #########
+  rGlueCrawlerForDataLake:
+    Type: AWS::Glue::Crawler
+    Properties:
+      # CrawlerSecurityConfiguration: !Ref pGlueSecurityConfigurationArn
+      Role: !GetAtt rTeamCrawlerRole.Arn
+      DatabaseName:
+        !Join ["-", [!Ref pOrg, !Ref pApp, !Ref pEnv, !Ref pTeamName, "db"]]
+      Name: !Sub "sdlf-${pTeamName}-${pDatasetName}-post-stage-crawler"
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${pSilverBucket}/post-stage/${pTeamName}/${pDatasetName}"
+
+  ######## SSM #########
+  rQueueRoutingPostStepSsm:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/DataLake/SQS/${pTeamName}/${pDatasetName}PostStageQueue"
+      Type: "String"
+      Value: !Select ["5", !Split [":", !GetAtt rQueueRoutingPostStep.Arn]]
+      Description: !Sub "Name of the Post Stage ${pTeamName} ${pDatasetName} Queue"
+
+  rDeadLetterQueueRoutingPostStepSsm:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/DataLake/SQS/${pTeamName}/${pDatasetName}PostStageDLQ"
+      Type: "String"
+      Value:
+        !Select ["5", !Split [":", !GetAtt rDeadLetterQueueRoutingPostStep.Arn]]
+      Description: !Sub "Name of the Post Stage ${pTeamName} ${pDatasetName} DLQ"
+
+  #===Glue Job Resources===
+  rGlueServicePolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      Description: AWS Glue policy with aci restrictions
+      ManagedPolicyName: !Sub "sdlf-${pTeamName}-${pDatasetName}-${AWS::Region}-glueservice-policy"
+      Path: /
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - "glue:*"
+            Resource:
+              - "*"
+          - Effect: Allow
+            Action:
+              - "s3:GetBucketLocation"
+              - "s3:ListBucket"
+              - "s3:ListAllMyBuckets"
+              - "s3:GetBucketAcl"
+              - "ec2:DescribeVpcEndpoints"
+              - "ec2:DescribeRouteTables"
+              - "ec2:CreateNetworkInterface"
+              - "ec2:DeleteNetworkInterface"
+              - "ec2:DescribeNetworkInterfaces"
+              - "ec2:DescribeSecurityGroups"
+              - "ec2:DescribeSubnets"
+              - "ec2:DescribeVpcAttribute"
+              - "iam:ListRolePolicies"
+              - "iam:GetRole"
+              - "iam:GetRolePolicy"
+              - "cloudwatch:PutMetricData"
+            Resource:
+              - "*"
+          - Effect: Allow
+            Action:
+              - "s3:CreateBucket"
+            Resource:
+              - "arn:aws:s3:::aws-glue-*"
+          - Effect: Allow
+            Action:
+              - "s3:GetObject"
+              - "s3:PutObject"
+              - "s3:DeleteObject"
+            Resource:
+              - "arn:aws:s3:::aws-glue-*/*"
+              - "arn:aws:s3:::*/*aws-glue-*/*"
+          - Effect: Allow
+            Action:
+              - "s3:GetObject"
+            Resource:
+              - "arn:aws:s3:::crawler-public*"
+              - "arn:aws:s3:::aws-glue-*"
+          - Effect: Allow
+            Action:
+              - "logs:CreateLogGroup"
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Resource:
+              - "arn:aws:logs:*:*:/aws-glue/*"
+          - Effect: Allow
+            Action:
+              - "ec2:CreateTags"
+              - "ec2:DeleteTags"
+            Condition:
+              "ForAllValues:StringEquals":
+                "aws:TagKeys":
+                  - aws-glue-service-resource
+            Resource:
+              - "arn:aws:ec2:*:*:network-interface/*"
+              - "arn:aws:ec2:*:*:security-group/*"
+              - "arn:aws:ec2:*:*:instance/*"
+
+  rReadWriteS3Policy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      Description: Policy with permissions read and write for s3
+      ManagedPolicyName: !Sub "sdlf-${pTeamName}-${pDatasetName}-${AWS::Region}-dataaccess-policy"
+      Path: /
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - "logs:AssociateKmsKey"
+            Resource:
+              #- "*"
+              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue*"
+              # - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/jobs/${pGlueSecurityConfigurationArn}-*"
+          - Effect: Allow
+            Action:
+              - "s3:GetObject"
+              - "s3:GetObjectVersion"
+              - "s3:GetBucketAcl"
+              - "s3:GetBucketLocation"
+            Resource:
+              - !Sub "arn:aws:s3:::${pBronzeBucket}/${pTeamName}/*"
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:PutObjectVersion
+              - s3:ListBucket
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:GetBucketVersioning
+              - s3:GetBucketAcl
+              - s3:GetBucketLocation
+              - s3:ListObjectsV2
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+            Resource:
+              - !Sub "arn:aws:s3:::${pSilverBucket}"
+              - !Sub "arn:aws:s3:::${pSilverBucket}/post-stage*"
+              - !Sub "arn:aws:s3:::${pSilverBucket}/post-stage/*"
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:PutObjectVersion
+              - s3:ListBucket
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:GetBucketVersioning
+              - s3:GetBucketAcl
+              - s3:GetBucketLocation
+              - s3:ListObjectsV2
+            Resource:
+              - !Sub "arn:aws:s3:::${pSilverBucket}"
+              - !Sub "arn:aws:s3:::${pSilverBucket}/*"
+            Condition: { "StringLike": { "s3:prefix": ["post-stage*"] } }
+
+  rTeamCrawlerRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "sdlf-${pTeamName}-${pDatasetName}-${AWS::Region}-datalake-crawler"
+      Path: "/service-role/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "glue.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
+        - "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+        - "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+        # - !Ref pGlueCatalogKmsKeyPolicyArn
+        # - !Ref pDataAccessDomain
+        - !Ref rGlueServicePolicy
+        - !Ref rReadWriteS3Policy
+
+  rMeteoritesJobRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "sdlf-${pTeamName}-${pDatasetName}-${AWS::Region}-glue-job"
+      Path: "/service-role/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "glue.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
+        - "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+        - "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+        - !Ref rReadWriteS3Policy
+        # - !Ref pDataAccessDomain
+
+  MeteoritesJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        ScriptLocation: "./glue-jobs/src/meteorites-glue-job.py"
+      DefaultArguments:
+        "--job-bookmark-option": job-bookmark-enable
+        "--enable-metrics": ""
+      ExecutionProperty:
+        MaxConcurrentRuns: 3
+      MaxRetries: 0
+      AllocatedCapacity: 2
+      GlueVersion: "1.0"
+      Name: !Sub "sdlf-${pTeamName}-${pDatasetName}-glue-job"
+      Role: !Ref rMeteoritesJobRole
+
+  rGlueDataCatalog:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Description: !Sub "Database to hold ${pTeamName} data"
+        Name: !Join [
+            "-",
+            [
+              "sdlf",
+              !Ref pTeamName,
+              !Ref pOrg,
+              !Ref pApp,
+              !Ref pEnv,
+              #!Ref pTeamName,
+              "db",
+            ],
+          ]
+
+  rGlueDataCatalogSsm:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/DataLake/Glue/${pTeamName}/DataCatalog"
+      Type: "String"
+      Value: !Ref rGlueDataCatalog
+      Description: "Name of the team-specific Glue Metadata Catalog"

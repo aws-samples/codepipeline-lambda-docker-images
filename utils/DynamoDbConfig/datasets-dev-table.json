@@ -1,0 +1,23 @@
+{
+  "classification": "Orange",
+  "description": "Meteorites Name, Location and Classification",
+  "frequency": "DAILY",
+  "max_items_process": 250,
+  "min_items_process": 1,
+  "name": "engineering-meteorites",
+  "owner": "NASA",
+  "owner_contact": "nasa@edu.org",
+  "pipeline": "main",
+  "tags": [
+    {
+      "key": "cost",
+      "value": "meteorites division"
+    }
+  ],
+  "transforms": {
+    "stage_a_transform": "light_transform_blueprint",
+    "stage_b_transform": "heavy_transform_blueprint"
+  },
+  "type": "TRANSACTIONAL",
+  "version": 1
+}

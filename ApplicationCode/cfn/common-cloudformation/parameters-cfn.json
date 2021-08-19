@@ -1,0 +1,1 @@
+[ { "Key": "pEnvironment", "Value": "dev" }, { "Key": "pOrganizationName", "Value": "aws" }, { "Key": "pApplicationName", "Value": "datalake" }, { "Key": "pNumBuckets", "Value": "3" }]

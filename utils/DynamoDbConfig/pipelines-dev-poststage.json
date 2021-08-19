@@ -1,0 +1,28 @@
+{
+    "description": "Main Pipeline to Merge Data",
+    "ingestion_frequency": "WEEKLY",
+    "last_execution_date": "2020-03-11",
+    "last_execution_duration_in_seconds": 502.545,
+    "last_execution_id": "7bb043a5-7c58-4777-971f-fe1d7ec6e629",
+    "last_execution_status": "COMPLETED",
+    "last_execution_timestamp": "2020-03-11T03:04:09.569Z",
+    "last_updated_timestamp": "2020-03-11T03:04:09.569Z",
+    "modules": [
+      {
+        "name": "PySpark",
+        "version": "1.0"
+      }
+    ],
+    "name": "engineering-main-post-stage",
+    "owner": "Neil Armstrong",
+    "owner_contact": "n.armstrong@",
+    "status": "ACTIVE",
+    "tags": [
+      {
+        "key": "org",
+        "value": "NASA"
+      }
+    ],
+    "type": "TRANSFORM",
+    "version": 6
+  }

@@ -1,0 +1,1238 @@
+#  Copyright Amazon.com, Inc. and its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT
+#  
+#  Licensed under the MIT License. See the LICENSE accompanying this file
+#  for the specific language governing permissions and limitations under
+#  the License.
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: AWS CodePipeline for deploying Serverless Datalake framework with docker images for Lambda Funtions
+
+###
+### CloudFormation Interface Metadata
+###
+
+
+###
+### Template input parameters
+###
+
+Parameters:
+  pPrefix:
+    Description: Common prefix for resource naming
+    Type: String
+    Default: dev
+    AllowedValues: ["dev", "stg", "prod"]
+
+  pAppCodeCommitRepositoryName:
+    Description: Application CodeCommit Repository Name
+    Type: String
+    Default: AppCode
+  
+  pCommonLayerCodeCommitRepository:
+    Description: Common Layer CodeCommit Repository Name
+    Type: String
+    Default: CommonLayerCode
+
+  pBranchName:
+    Description: The branch Name
+    Type: String
+    Default: main
+
+
+###
+### Template Resources
+###
+
+Resources:
+  #CodeBuild Project for building a new docker image and push it to ECR
+  rAppBuildServer:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      EncryptionKey: !Ref rKMSKey
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Value: !Sub '${rCodePipelineArtifactStoreBucket}'
+          - Name: RESOURCE_PREFIX
+            Value: !Sub '${pPrefix}'
+          - Name: ECR_COMMON_DATALAKE_REPO_URL
+            Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${rCommonDatalakeECRRepo}'
+        PrivilegedMode: true
+        Image: 'aws/codebuild/amazonlinux2-x86_64-standard:3.0'
+        Type: LINUX_CONTAINER
+      ServiceRole: !Ref rCodeBuildRole
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yaml
+      Tags:
+      - Key: Name
+        Value: !Sub "CodeBuild Project for building docker images in the stack ${AWS::StackName}"
+      TimeoutInMinutes: 120
+
+  #CodePipeline service used for CI/CD process
+  rAppPipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      ArtifactStore:
+        EncryptionKey:
+          Id: !Ref rKMSKey
+          Type: KMS
+        Location: !Ref rCodePipelineArtifactStoreBucket
+        Type: S3
+      RoleArn: !GetAtt
+        - rCodePipelineServiceRole
+        - Arn
+      Stages:
+        - Actions:
+            - ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: ECR
+                Version: '1'
+              Configuration:
+                RepositoryName: !Ref rCommonDatalakeECRRepo
+              InputArtifacts: []
+              Name: Source
+              Namespace: SourceVariables
+              OutputArtifacts:
+              - Name: SourceArtifact
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: '1'
+              Configuration:
+                BranchName: !Ref pBranchName
+                OutputArtifactFormat: CODE_ZIP
+                PollForSourceChanges: 'false'
+                RepositoryName: !Sub '${rAppCodeCommitRepo.Name}'
+              InputArtifacts: []
+              Name: codecommit
+              OutputArtifacts:
+              - Name: sourcecodecommit
+              RunOrder: 1
+          Name: Source
+        - Actions:
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref rAppBuildServer
+              InputArtifacts:
+                - Name: sourcecodecommit
+              Name: CodeBuildServer
+              OutputArtifacts:
+                - Name: BuildArtifact
+              RunOrder: 1
+          Name: ImageandCfnBuildServer
+        - Actions:
+            - ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+                ChangeSetName: Common-CloudFormation
+                RoleArn: !Sub '${rCodePipelineServiceRole.Arn}'
+                StackName: Common-CloudFormation
+                TemplateConfiguration: BuildArtifact::cfn/common-cloudformation/parameters.json
+                TemplatePath: BuildArtifact::cfn/common-cloudformation/packaged-template.yaml
+              InputArtifacts:
+              - Name: BuildArtifact
+              Name: common-cloudformation
+              OutputArtifacts: []
+              RunOrder: 1
+          Name: CommonCloudFormationChangeSet
+        - Actions:
+          - ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Provider: CloudFormation
+              Version: '1'
+            Configuration:
+              ActionMode: CHANGE_SET_EXECUTE
+              ChangeSetName: Common-CloudFormation
+              StackName: Common-CloudFormation
+            InputArtifacts:
+            - Name: BuildArtifact
+            Name: DeployCommonCloudFormation
+            OutputArtifacts: []
+            RunOrder: 1
+          Name: DeployCommonCloudFormation
+        - Actions:
+          - ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Provider: CloudFormation
+              Version: '1'
+            Configuration:
+              ActionMode: CHANGE_SET_REPLACE
+              Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+              ChangeSetName: Stage-A
+              RoleArn: !Sub '${rCodePipelineServiceRole.Arn}'
+              StackName: Stage-A
+              TemplateConfiguration: BuildArtifact::cfn/stageA/parameters.json
+              TemplatePath: BuildArtifact::cfn/stageA/packaged-template.yaml
+            InputArtifacts:
+            - Name: BuildArtifact
+            Name: StageAResources
+            OutputArtifacts: []
+            RunOrder: 1
+          - ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Provider: CloudFormation
+              Version: '1'
+            Configuration:
+              ActionMode: CHANGE_SET_REPLACE
+              Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+              ChangeSetName: Stage-B
+              RoleArn: !Sub '${rCodePipelineServiceRole.Arn}'
+              StackName: Stage-B
+              TemplateConfiguration: BuildArtifact::cfn/stageB/parameters.json
+              TemplatePath: BuildArtifact::cfn/stageB/packaged-template.yaml
+            InputArtifacts:
+            - Name: BuildArtifact
+            Name: StageBResources
+            OutputArtifacts: []
+            Region: us-east-2
+            RunOrder: 1
+          - ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Provider: CloudFormation
+              Version: '1'
+            Configuration:
+              ActionMode: CHANGE_SET_REPLACE
+              Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+              ChangeSetName: sdlf-engineering-meteorites
+              RoleArn: !Sub '${rCodePipelineServiceRole.Arn}'
+              StackName: sdlf-engineering-meteorites
+              TemplateConfiguration: BuildArtifact::cfn/datasets/parameters.json
+              TemplatePath: BuildArtifact::cfn/datasets/packaged-template.yaml
+            InputArtifacts:
+            - Name: BuildArtifact
+            Name: dataset
+            OutputArtifacts: []
+            RunOrder: 2
+          Name: AppResourcesCloudFormationChangeSets
+        - Actions:
+          - ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Provider: CloudFormation
+              Version: '1'
+            Configuration:
+              ActionMode: CHANGE_SET_EXECUTE
+              ChangeSetName: Stage-A
+              StackName: Stage-A
+            InputArtifacts:
+            - Name: BuildArtifact
+            Name: DeployStageA
+            OutputArtifacts: []
+            RunOrder: 1
+          - ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Provider: CloudFormation
+              Version: '1'
+            Configuration:
+              ActionMode: CHANGE_SET_EXECUTE
+              ChangeSetName: Stage-B
+              StackName: Stage-B
+            InputArtifacts:
+            - Name: BuildArtifact
+            Name: DeployStageB
+            OutputArtifacts: []
+            RunOrder: 1
+          - ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Provider: CloudFormation
+              Version: '1'
+            Configuration:
+              ActionMode: CHANGE_SET_EXECUTE
+              ChangeSetName: sdlf-engineering-meteorites
+              StackName: sdlf-engineering-meteorites
+            InputArtifacts:
+            - Name: BuildArtifact
+            Name: DeployDataSet
+            OutputArtifacts: []
+            RunOrder: 2
+          Name: AppResourcesDeployCloudFormation
+  #Bucket Policy for the CodePipeline's Artifact Store S3 bucket
+  rArtifactStoreBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref rCodePipelineArtifactStoreBucket
+      PolicyDocument:
+        Statement:
+          - Action: 's3:*'
+            Effect: Allow
+            Principal:
+              AWS: !Split
+                - ','
+                - !Sub '${rCodeBuildRole.Arn},${rCodePipelineServiceRole.Arn}'
+                # - !Sub '${pProdAccountAssumeRoleARN},${rCodeBuildRole.Arn},${rCodePipelineServiceRole.Arn}'
+            Resource:
+              - !Sub 'arn:aws:s3:::${rCodePipelineArtifactStoreBucket}'
+              - !Sub 'arn:aws:s3:::${rCodePipelineArtifactStoreBucket}/*'
+            Sid: Stmt1551213502791
+
+  #Service Role that will used by the CodeBuild project while running Builds
+  rCodeBuildRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+        Version: 2012-10-17
+      Path: /
+      ManagedPolicyArns:
+        - !Ref rDeployerCodeBuildPolicy1
+        - !Ref rDeployerCodeBuildPolicy2
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'ecr:GetAuthorizationToken'
+                Effect: Allow
+                Resource: '*'
+              - Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:GetObjectVersion'
+                Effect: Allow
+                Resource: !Sub 'arn:aws:s3:::${rCodePipelineArtifactStoreBucket}/*'
+              - Action:
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:PutImage'
+                  - 'ecr:InitiateLayerUpload'
+                  - 'ecr:UploadLayerPart'
+                  - 'ecr:CompleteLayerUpload'
+                Effect: Allow
+                Resource: !Sub >-
+                  arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${pPrefix}*
+            Version: 2012-10-17
+          PolicyName: root
+
+  #Artifact Store S3 bucket that will used by CodePipeline to store artifacts
+  rCodePipelineArtifactStoreBucket:
+    Type: 'AWS::S3::Bucket'
+    #DeletionPolicy: Retain
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "Artifact Store S3 Bucket for CodePipeline in the stack ${AWS::StackName}"
+      VersioningConfiguration:
+        Status: Enabled
+
+  #Service Role that will be used by CodePipeline
+  rCodePipelineServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service: 
+                - codepipeline.amazonaws.com
+                - cloudformation.amazonaws.com
+            Sid: ''
+        Version: 2012-10-17
+      Path: /
+      ManagedPolicyArns:
+        - !Ref rDeployerCodeBuildPolicy1
+        - !Ref rDeployerCodeBuildPolicy2
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:GetBucketVersioning'
+                Effect: Allow
+                Resource:
+                  - !Sub 'arn:aws:s3:::${rCodePipelineArtifactStoreBucket}/*'
+              - Action:
+                  - 'ecs:DescribeServices'
+                  - 'ecs:DescribeTaskDefinition'
+                  - 'ecs:DescribeTasks'
+                  - 'ecs:ListTasks'
+                  - 'ecs:RegisterTaskDefinition'
+                  - 'ecs:UpdateService'
+                  - 'iam:PassRole'
+                  - 'codecommit:*'
+                  - 'codebuild:*'
+                  - 'kms:Encrypt'
+                  - 'kms:Decrypt'
+                  - 'kms:ReEncrypt*'
+                  - 'kms:GenerateDataKey*'
+                  - 'kms:DescribeKey'
+                Effect: Allow
+                Resource: '*'
+              - Action: 'sns:Publish'
+                Effect: Allow
+                Resource: '*'
+              - Action:
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:PutImage'
+                  - 'ecr:InitiateLayerUpload'
+                  - 'ecr:UploadLayerPart'
+                  - 'ecr:CompleteLayerUpload'
+                  - 'ecr:DescribeImages'
+                Effect: Allow
+                Resource: !Sub >-
+                  arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${pPrefix}*
+            Version: 2012-10-17
+          PolicyName: codepipelinepolicy
+
+  #####All ECR Repositories where the Docker images are written to #####
+  rCommonDatalakeECRRepo:
+    Type: 'AWS::ECR::Repository'
+    #DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${pPrefix}-common-datalake-library"
+
+  rRoutingLambdaECRRepo:
+    Type: 'AWS::ECR::Repository'
+    #DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${pPrefix}-routing-lambda"
+
+  rRedriveLambdaECRRepo:
+    Type: 'AWS::ECR::Repository'
+    #DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${pPrefix}-redrive-lambda"
+
+  rStageAErrorECRRepo:
+    Type: 'AWS::ECR::Repository'
+    #DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${pPrefix}-stage-a-error"
+
+  rStageAPostUpdateMetadataECRRepo:
+    Type: 'AWS::ECR::Repository'
+    #DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${pPrefix}-stage-a-postupdate-metadata"
+
+  rStageAPreUpdateMetadataECRRepo:
+    Type: 'AWS::ECR::Repository'
+    #DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${pPrefix}-stage-a-preupdate-metadata"
+
+  rStageAProcessObjectECRRepo:
+    Type: 'AWS::ECR::Repository'
+    #DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${pPrefix}-stage-a-process-object"
+
+  rStageARoutingECRRepo:
+    Type: 'AWS::ECR::Repository'
+    #DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${pPrefix}-stage-a-routing"
+
+  rStageARedriveECRRepo:
+    Type: 'AWS::ECR::Repository'
+    #DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${pPrefix}-stage-a-redrive"
+
+  rStageBCheckJobECRRepo:
+    Type: 'AWS::ECR::Repository'
+    #DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${pPrefix}-stage-b-check-job"
+
+  rStageBCrawldataECRRepo:
+    Type: 'AWS::ECR::Repository'
+    #DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${pPrefix}-stage-b-crawl-data"
+
+  rStageBErrorECRRepo:
+    Type: 'AWS::ECR::Repository'
+    #DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${pPrefix}-stage-b-error"
+
+  rStageBPostUpdateMetadataECRRepo:
+    Type: 'AWS::ECR::Repository'
+    #DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${pPrefix}-stage-b-postupdate-metadata"
+  
+  rStageBProcessDataECRRepo:
+    Type: 'AWS::ECR::Repository'
+    #DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${pPrefix}-stage-b-process-data"
+
+  rStageBRoutingECRRepo:
+    Type: 'AWS::ECR::Repository'
+    #DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${pPrefix}-stage-b-routing"
+
+  rStageBRedriveECRRepo:
+    Type: 'AWS::ECR::Repository'
+    #DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${pPrefix}-stage-b-redrive"
+
+  #KMS CMK used by CodePipeline to encrypt the artifacts
+  rKMSKey:
+    Type: 'AWS::KMS::Key'
+    #DeletionPolicy: Retain
+    Properties:
+      Description: A sample key
+      KeyPolicy:
+        Id: key-default-1
+        Statement:
+          - Action: 'kms:*'
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Resource: '*'
+            Sid: Enable IAM User Permissions
+          - Action:
+              - 'kms:Encrypt'
+              - 'kms:Decrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:DescribeKey'
+            Effect: Allow
+            Principal:
+              AWS: !Split
+                - ','
+                - !Sub '${rCodeBuildRole.Arn},${rCodePipelineServiceRole.Arn}'
+            Resource: '*'
+            Sid: Allow administration of the key
+        Version: 2012-10-17
+      Tags:
+      - Key: Name
+        Value: !Sub "KMS key for encrypting the CodePipeline Artifacts in the stack ${AWS::StackName}"
+
+  #CodeCommitrepository for application
+  rAppCodeCommitRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: !Sub '${pPrefix}-${pAppCodeCommitRepositoryName}'
+      RepositoryDescription: This is a repository for application code
+
+#Lambda layer codepipeline resources
+  
+  #CodeBuild Project for building a new docker image and push it to ECR
+  rCommonLayerBuildServer:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      EncryptionKey: !Ref rKMSKey
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ECR_COMMON_DATALAKE_REPO_URL
+            Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${rCommonDatalakeECRRepo}'
+          - Name: RESOURCE_PREFIX
+            Value: !Sub '${pPrefix}'
+        PrivilegedMode: true
+        Image: 'aws/codebuild/amazonlinux2-x86_64-standard:3.0'
+        Type: LINUX_CONTAINER
+      ServiceRole: !Ref rCodeBuildRole
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yaml
+      Tags:
+      - Key: Name
+        Value: !Sub "CodeBuild Project for building docker images in the stack ${AWS::StackName}"
+      TimeoutInMinutes: 120
+
+  #CodePipeline service used for CI/CD process
+  #CodeCommitrepository for application
+  rCommonLayerCodeCommitRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: !Sub '${pPrefix}-${pCommonLayerCodeCommitRepository}'
+      RepositoryDescription: This is a repository for common layer code
+
+  rCommonLayerPipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      ArtifactStore:
+        EncryptionKey:
+          Id: !Ref rKMSKey
+          Type: KMS
+        Location: !Ref rCodePipelineArtifactStoreBucket
+        Type: S3
+      RoleArn: !GetAtt
+        - rCodePipelineServiceRole
+        - Arn
+      Stages:
+        - Actions:
+            - ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: '1'
+              Configuration:
+                BranchName: !Ref pBranchName
+                PollForSourceChanges: 'false'
+                RepositoryName: !Sub '${rCommonLayerCodeCommitRepo.Name}'
+              Name: SourceAction
+              OutputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 1
+          Name: Source
+        - Actions:
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref rCommonLayerBuildServer
+              InputArtifacts:
+                - Name: SourceOutput
+              Name: CodeBuildServer
+              OutputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+          Name: CommonLayerImageBuildServer
+
+  rAppPipelineTriggerEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+        - aws.codecommit
+        detail-type:
+        - CodeCommit Repository State Change
+        resources:
+        - !Sub '${rAppCodeCommitRepo.Arn}'
+        detail:
+          event:
+          - referenceCreated
+          - referenceUpdated
+          referenceType:
+          - branch
+          referenceName:
+          - Ref: pBranchName
+      Targets:
+      - Arn: !Sub 'arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${rAppPipeline}'
+        RoleArn: !Sub '${rCloudWatchTriggerRole.Arn}'
+        Id:
+          Fn::Join:
+          - '-'
+          - - codepipeline
+            - Ref: pAppCodeCommitRepositoryName
+
+  rAppPipelineEcrTriggerEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+        - aws.ecr
+        detail-type:
+        - ECR Image Action
+        detail:
+          action-type:
+          - PUSH
+          image-tag:
+          - latest
+          result:
+          - SUCCESS
+          repository-name:
+          - Ref: rCommonDatalakeECRRepo
+      Targets:
+      - Arn: !Sub 'arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${rAppPipeline}'
+        RoleArn: !Sub '${rCloudWatchTriggerRole.Arn}'
+        Id:
+          Fn::Join:
+          - '-'
+          - - codepipeline
+            - Ref: rCommonDatalakeECRRepo
+
+  rCommonlayerPipelineTriggerEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+        - aws.codecommit
+        detail-type:
+        - CodeCommit Repository State Change
+        resources:
+        - !Sub '${rCommonLayerCodeCommitRepo.Arn}'
+        detail:
+          event:
+          - referenceCreated
+          - referenceUpdated
+          referenceType:
+          - branch
+          referenceName:
+          - Ref: pBranchName
+      Targets:
+      - Arn: !Sub 'arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${rCommonLayerPipeline}'
+        RoleArn: !Sub '${rCloudWatchTriggerRole.Arn}'
+        Id:
+          Fn::Join:
+          - '-'
+          - - codepipeline
+            - Ref: pCommonLayerCodeCommitRepository
+
+  rCloudWatchTriggerRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+        Version: 2012-10-17
+      Path: /
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - 'codepipeline:StartPipelineExecution'
+                Effect: Allow
+                Resource:
+                  - !Sub 'arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${rAppPipeline}'
+                  - !Sub 'arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${rCommonLayerPipeline}'
+          PolicyName: !Sub '${pPrefix}-start-pipeline-execution-${AWS::AccountId}-${AWS::Region}'
+
+  rDeployerCodeBuildPolicy1:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Path: /
+      Description:
+        'Fn::Join':
+          - ''
+          - - 'This IAM Policy is used to access AWS Services to provision infratructure associated with the CI-CD Pipeline within the AWS Account Account to build out the SSM Parameter Store - CodePipeline - CloudWatch Events - Glue - Step Functions - S3 - CloudWatch Logs and CloudFormation. Provisioned as part of Request '
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - 'ssm:AddTagsToResource'
+              - 'ssm:DescribeParameters'
+              - 'ssm:GetOpsSummary'
+              - 'ssm:GetParameter'
+              - 'ssm:GetParameterHistory'
+              - 'ssm:GetParameters'
+              - 'ssm:GetParametersByPath'
+              - 'ssm:ListTagsForResource'
+              - 'ssm:PutParameter'
+              - 'ssm:RemoveTagsFromResource'
+              - 'ssm:DeleteParameter'
+            Effect: Allow
+            Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/DataLake/*"
+          - Action:
+              - 'codepipeline:CreatePipeline'
+              - 'codepipeline:DeletePipeline'
+              - 'codepipeline:GetPipeline'
+              - 'codepipeline:GetPipelineExecution'
+              - 'codepipeline:GetPipelineState'
+              - 'codepipeline:ListActionExecutions'
+              - 'codepipeline:ListPipelineExecutions'
+              - 'codepipeline:ListPipelines'
+              - 'codepipeline:ListTagsForResource'
+              - 'codepipeline:StartPipelineExecution'
+              - 'codepipeline:TagResource'
+              - 'codepipeline:UntagResource'
+              - 'codepipeline:UpdatePipeline'
+            Effect: Allow
+            Resource: !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:*"
+          - Action:
+              - 'codepipeline:ListActionTypes'
+              - 'codepipeline:ListTagsForResource'
+              - 'codepipeline:TagResource'
+              - 'codepipeline:UntagResource'
+            Effect: Allow
+            Resource: !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:actiontype:*"
+          -
+            Effect: "Allow"
+            Action:                
+              - 'events:DescribeRule'
+              - 'events:EnableRule'
+              - 'events:PutRule'
+              - 'events:TagResource'
+              - 'events:PutTargets'
+              - 'events:DeleteRule'
+              - 'events:ListRuleNamesByTarget'
+              - 'events:ListTagsForResource'
+              - 'events:ListRules'
+              - 'events:RemoveTargets'
+              - 'events:ListTargetsByRule'
+              - 'events:UntagResource'
+              - 'events:DisableRule'
+            Resource: 
+              - !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/*
+          # Doesn't support restrictions
+          -
+            Effect: Allow
+            Action:
+              - 'events:TestEventPattern'
+              - 'events:PutEvents'
+            Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:*"
+          - Action:
+              - 'glue:CreateDatabase'
+              - 'glue:DeleteDatabase'
+              - 'glue:GetDatabase'
+              - 'glue:GetDatabases'
+              - 'glue:GetTags'
+              - 'glue:TagResource'
+              - 'glue:UntagResource'
+            Effect: Allow
+            Resource:
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:userDefinedFunction/*"
+
+          # Needs * in resource - cant restrict    
+          - Action:
+              - 'glue:CreateSecurityConfiguration'
+              - 'glue:GetSecurityConfiguration'
+              - 'glue:DeleteSecurityConfiguration'
+            Effect: Allow
+            Resource: "*"
+          - 
+            Effect: "Allow"
+            Action:
+              - "logs:DescribeLogGroups"
+              - "logs:DescribeLogStreams"
+              - "logs:CreateLogStream"
+              - "logs:TagLogGroup"
+              - "logs:DeleteLogGroup"
+              - "logs:DeleteLogStream"
+              - "logs:PutLogEvents"
+            Resource: 
+              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*:*"
+              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*"
+          - 
+            Effect: "Allow"
+            Action:
+              - "logs:CreateLogGroup"
+            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+          - Action:
+              - 'codebuild:CreateProject'
+              - 'codebuild:DeleteProject'
+              - 'codebuild:ListProjects'
+              - 'codebuild:UpdateProject'
+              - 'codebuild:BatchGetProjects'
+            Effect: Allow
+            Resource: !Sub "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/*"
+          - Action:
+              - 's3:GetObject'
+              - 's3:PutObject'
+              - 's3:GetObjectVersion'
+            Effect: Allow
+            Resource: !Sub 'arn:aws:s3:::${rCodePipelineArtifactStoreBucket}/*'
+          - Action:
+              - 'ssm:PutParameter'
+              - 'ssm:GetParameter'
+            Effect: Allow
+            Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/DataLake/*"
+          #  Is there anyway we can trim this back at all? "DeleteBucket" on "*" is very dangerous. Or we can put our "Guard Rails" Policy on the Roles to
+          #   not allow delete on our "protected" S3 Buckets for Logging/Auditing
+          - Action:
+              - 's3:ListBuckets'
+              - 's3:ListBucket'
+              - 's3:CreateBucket'
+              - 's3:DeleteBucket'
+              - 's3:ListObjectsV2'
+              - 's3:PutObject'
+              - 's3:GetObject'
+              - 's3:SetBucketEncryption'
+              - 's3:GetEncryptionConfiguration'
+              - 's3:PutEncryptionConfiguration'
+              - 's3:PutBucketAcl'
+              - 's3:PutBucketLogging'
+              - 's3:PutBucketVersioning'
+              - 's3:PutBucketPolicy'
+              - 's3:DeleteBucketPolicy'
+              - 's3:PutBucketPublicAccessBlock'
+              - 's3:GetBucketPolicy'
+              - 's3:PutBucketNotification'
+              - 's3:GetBucketNotification'
+              - 's3:PutBucketTagging'
+            Effect: Allow
+            Resource:
+              - !Sub "arn:aws:s3:::*"
+              - !Sub "arn:aws:s3:::*/*"
+          - 
+            Effect: "Allow"
+            Action:
+              - "cloudformation:CreateStack"
+              - "cloudformation:DeleteStack"
+              - "cloudformation:DescribeStacks"
+              - "cloudformation:UpdateStack"
+              - "cloudformation:CreateChangeSet"
+              - "cloudformation:DeleteChangeSet"
+              - "cloudformation:DescribeChangeSet"
+              - "cloudformation:ExecuteChangeSet"
+              - "cloudformation:SetStackPolicy"
+            Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/*"
+          - 
+            Effect: "Allow"
+            Action:
+              - "cloudformation:DeleteChangeSet"
+              - "cloudformation:DescribeChangeSet"
+              - "cloudformation:CreateChangeSet"
+              - "cloudformation:ExecuteChangeSet"
+            Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:aws:transform/*"
+          - 
+            Effect: "Allow"
+            Action:
+              - "cloudformation:ValidateTemplate"
+            Resource: "*"
+          - 
+            Effect: "Allow"
+            Action:
+              - "ecr:GetRepositoryPolicy"
+              - "ecr:SetRepositoryPolicy"
+              - "ecr:GetDownloadUrlForLayer"
+              - "ecr:BatchGetImage"
+              - "ecr:BatchCheckLayerAvailability"
+              - "ecr:PutImage"
+              - "ecr:InitiateLayerUpload"
+              - "ecr:UploadLayerPart"
+              - "ecr:CompleteLayerUpload"
+            Resource: !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/*"
+  rDeployerCodeBuildPolicy2:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Path: /
+      Description: This IAM Policy is used to access AWS Services to provision infratructure associated with the CI-CD Pipeline within the AWS Account Account to build out the SSM Parameter Store - SQS - Lambda - DynamoDB - IAM - Application Auto Scaling and the Shared KMS Key for CI-CD. Provisioned as part of Request     
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - 'sqs:TagQueue'
+              - 'sqs:AddPermission'
+              - 'sqs:ChangeMessageVisibility'
+              - 'sqs:CreateQueue'
+              - 'sqs:DeleteQueue'
+              - 'sqs:ChangeMessageVisibilityBatch'
+              - 'sqs:SetQueueAttributes'
+              - 'sqs:ListQueues'
+              - 'sqs:GetQueueAttributes'
+            Effect: Allow
+            Resource: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:*"
+          - Action:
+              - 'kms:CreateAlias'
+              - 'kms:CreateGrant'
+              - 'kms:CreateKey'
+              - 'kms:DeleteAlias'
+              - 'kms:DescribeKey'
+              - 'kms:EnableKey'
+              - 'kms:GetKeyPolicy'
+              - 'kms:GetKeyRotationStatus'
+              - 'kms:ListAliases'
+              - 'kms:ListKeyPolicies'
+              - 'kms:ListKeys'
+              - 'kms:ListResourceTags'
+              - 'kms:ListRetirableGrants'
+              - 'kms:PutKeyPolicy'
+              - 'kms:TagResource'
+              - 'kms:UntagResource'
+              - 'kms:UpdateAlias'
+              - 'kms:UpdateKeyDescription'
+              - 'kms:EnableKeyRotation'
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - 'ssm:PutParameter'
+              - 'ssm:GetParameter'
+            Effect: Allow
+            Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/DataLake/*"
+          - 
+            Effect: "Allow"
+            Action:
+              - "lambda:AddPermission"
+              - "lambda:RemovePermission"
+              - "lambda:CreateFunction"
+              - "lambda:InvokeFunction"
+              - "lambda:UpdateFunctionConfiguration"
+              - "lambda:CreateAlias"
+              - "lambda:DeleteFunction"
+              - "lambda:GetFunction"
+              - "lambda:PublishVersion"
+              - "lambda:UpdateAlias"
+              - "lambda:UpdateFunctionCode"
+              - "lambda:UpdateFunctionConfiguration"
+              - "lambda:GetFunctionConfiguration"
+              - "lambda:TagResource"
+              - "lambda:UntagResource"
+              - "lambda:ListTags"
+              - "lambda:DeleteFunctionConcurrency"
+              - "lambda:PutFunctionConcurrency"
+            Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*"
+          #Need to change datalake library and pip library scripts to use prefix
+          - 
+            Effect: "Allow"
+            Action:
+              - "lambda:GetLayerVersion"
+            Resource: "*"
+          - 
+            Effect: "Allow"
+            Action:
+              - "lambda:GetEventSourceMapping"
+              - "lambda:UpdateEventSourceMapping"
+              - "lambda:CreateEventSourceMapping"
+              - "lambda:DeleteEventSourceMapping"
+            Resource: "*"
+            Condition:
+              StringLike: 
+                'lambda:FunctionArn': !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*"
+          - Action:
+              - 'dynamodb:CreateTable'
+              - 'dynamodb:DescribeTable'
+              - 'dynamodb:ListTagsOfResource'
+              - 'dynamodb:TagResource'
+              - 'dynamodb:UntagResource'
+              - 'dynamodb:UpdateTable'
+              - 'dynamodb:UpdateTimeToLive'
+              - 'dynamodb:DeleteTable'
+              - 'dynamodb:DescribeTimeToLive'
+            Effect: Allow
+            Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/octagon-*"
+          - Action:
+              - 'dynamodb:ListTables'
+            Effect: Allow
+            Resource: "*"
+          -
+            Effect: "Allow"
+            Action:
+              - "iam:GetPolicyVersion"
+              - "iam:GetRole"
+              - "iam:GetPolicy"
+              - "iam:UntagRole"
+              - "iam:TagRole"
+              - "iam:CreateRole"
+              - "iam:DeleteRole"
+              - "iam:UpdateRoleDescription"
+              - "iam:UpdateRole"
+              - "iam:ListRolePolicies"
+              - "iam:GetRolePolicy"
+              - "iam:PutRolePolicy"
+              - "iam:DeleteRolePolicy"
+              - "iam:ListRoles"
+              - "iam:DetachRolePolicy"
+            Resource: 
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/*"
+          -
+            Effect: "Allow"
+            Action:
+              - "iam:GetRole"
+              - "iam:PassRole"
+              - "iam:DetachRolePolicy"
+              - "iam:DeleteRole"
+              - "iam:ListRoles"
+              - "iam:AttachRolePolicy"
+            Resource: 
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/*"
+          -
+            Effect: "Allow"
+            Action:
+              - "iam:GetPolicyVersion"
+              - "iam:GetPolicy"
+              - "iam:CreatePolicy"
+              - "iam:CreatePolicyVersion"
+              - "iam:ListPolicyVersions"
+              - "iam:DetachRolePolicy"
+              - "iam:ListPolicies"
+              - "iam:AttachRolePolicy"
+              - "iam:DeletePolicy"
+              - "iam:DeletePolicyVersion"
+            Resource: !Sub "arn:aws:iam::${AWS::AccountId}:policy/*"
+          -
+            Effect: "Allow"
+            Action:
+              - "iam:DeletePolicy"
+              - "iam:DeletePolicyVersion"
+            Resource:
+              - !Sub "arn:aws:iam::${AWS::AccountId}:policy/*"
+
+          - Action:
+              - 'application-autoscaling:DeleteScalingPolicy'
+              - 'application-autoscaling:DeleteScheduledAction'
+              - 'application-autoscaling:DeregisterScalableTarget'
+              - 'application-autoscaling:DescribeScalableTargets'
+              - 'application-autoscaling:DescribeScalingActivities'
+              - 'application-autoscaling:DescribeScalingPolicies'
+              - 'application-autoscaling:DescribeScheduledActions'
+              - 'application-autoscaling:PutScalingPolicy'
+              - 'application-autoscaling:PutScheduledAction'
+              - 'application-autoscaling:RegisterScalableTarget'
+            Effect: Allow
+            Resource: '*'
+          - 
+            Effect: "Allow"
+            Action:
+              - "states:TagResource"
+              - "states:UnTagResource"
+              - "states:CreateStateMachine"
+              - "states:DeleteStateMachine"
+              - "states:UpdateStateMachine"
+              - "states:DescribeStateMachine"
+            Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:*"
+          - 
+            Effect: "Allow"
+            Action:
+              - "states:DescribeStateMachineForExecution"
+            Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:sdlf-*:*"
+          - 
+            Effect: "Allow"
+            Action:
+              - "states:DescribeActivity"
+              - "states:CreateActivity"
+              - "states:DeleteActivity"
+              - "states:TagResource"
+              - "states:GetActivityTask"
+            Resource: "*"
+          - 
+            Effect: "Allow"
+            Action:
+              - "states:ListStateMachines"
+              - "states:ListActivities"
+            Resource: "*"
+          - 
+            Effect: Allow
+            Action:
+              - 'glue:CreateCrawler'
+              - 'glue:CreateJob'
+              - 'glue:DeleteCrawler'
+              - 'glue:DeleteJob'
+              - 'glue:GetCrawler'
+              - 'glue:GetCrawlers'
+              - 'glue:GetJob'
+              - 'glue:GetJobs'
+              - 'glue:StopCrawler'
+              - 'glue:ListCrawlers'
+              - 'glue:ListJobs'
+              - 'glue:UpdateCrawler'
+              - 'glue:UpdateJob'
+            Resource: '*'
+          -
+            Effect: Allow
+            Action:
+              - 'glue:TagResource'
+              - 'glue:UntagResource'
+              - 'glue:GetTags'
+            Resource: 
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/sdlf-*"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/sdlf-*"
+          -
+            Effect: Allow
+            Action:
+              - 'glue:GetTable'
+              - 'glue:GetTables'
+              - 'glue:GetTableVersion'
+              - 'glue:GetTableVersions'
+              - 'glue:UpdateTable'
+              - 'glue:CreateTable'
+              - 'glue:DeleteTable'
+            Resource: 
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:tableversion/*"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/sdlf*"
+###
+### Template Outputs
+###
+
+Outputs:
+
+  #Name of the ArtifactStore used by CodePipeline
+  oArtifactStore:
+    Description: 'Name of the Artifact Store S3 bucket used by CodePipeline'
+    Value: !Ref rCodePipelineArtifactStoreBucket
+
+  #KMS Key used for the Artifacts stored in the S3 Artifact store
+  oArtifactStoreKMSKey:
+    Description: 'KMS Key used to encrypt the artifacts used by CodePipeline'
+    Value: !Ref rKMSKey
+
+  #Name of the Created CodePipeline
+  oCommonLayerCodePipelineName:
+    Description: 'Name of the Pipeline created in the Dev account'
+    Value: !Ref rCommonLayerPipeline
+  
+  #CodeBuild Project used for creating a new docker image for common layer and push it to ECR
+  oCommonLayerCodeBuildServerName:
+    Description: Name of the CodeBuild Project used for creating and pushing the final image to ECR RepositoryName
+    Value: !Ref rCommonLayerBuildServer
+
+  #Name of the Created CodePipeline
+  oAppCodePipelineName:
+    Description: 'Name of the Pipeline created in the Dev account'
+    Value: !Ref rAppPipeline
+  
+   #CodeBuild Project used for creating a new docker images for all apps and push it to ECR
+  oAppCodeBuildServerName:
+    Description: Name of the CodeBuild Project used for creating and pushing the final image to ECR RepositoryName
+    Value: !Ref rAppBuildServer
+
+  #ServiceRole used by CodePipeline
+  oCodePipelineServiceRole:
+    Description: CodePipeline's Service Role
+    Value: !GetAtt rCodePipelineServiceRole.Arn
+
+  #Https url of the Application CodeCommit Repository
+  oAppCodeCommitHttpsRepoUrl:
+    Description: Name of the ECR repository used for pushing code for common layer image
+    Value: !Sub '${rAppCodeCommitRepo.CloneUrlHttp}'
+
+  #Https url of the Common Layer CodeCommit Repository
+  oCommonLayerCodeCommitHttpsRepoUrl:
+    Description: Name of the ECR repository used for pushing code for application images
+    Value: !Sub '${rCommonLayerCodeCommitRepo.CloneUrlHttp}'
+
+ #Ssh url of the Application CodeCommit Repository
+  oAppCodeCommitSshRepoUrl:
+    Description: Name of the ECR repository used for pushing code for common layer image
+    Value: !Sub '${rAppCodeCommitRepo.CloneUrlSsh}'
+
+  #Ssh url of the Common Layer CodeCommit Repository
+  oCommonLayerCodeCommitSshRepoUrl:
+    Description: Name of the ECR repository used for pushing code for application images
+    Value: !Sub '${rCommonLayerCodeCommitRepo.CloneUrlSsh}'
+
+  #Https GRC url of the Application CodeCommit Repository
+  oAppCodeCommitHttpsGrcRepoUrl:
+    Description: Name of the ECR repository used for pushing code for common layer image
+    Value: !Sub 'codecommit::${AWS::Region}://${rAppCodeCommitRepo.Name}'
+
+  #Https GRC url of the Common Layer CodeCommit Repository
+  oCommonLayerCodeCommitHttpsGrcRepoUrl:
+    Description: Name of the ECR repository used for pushing code for application images
+    Value: !Sub 'codecommit::${AWS::Region}://${rCommonLayerCodeCommitRepo.Name}'

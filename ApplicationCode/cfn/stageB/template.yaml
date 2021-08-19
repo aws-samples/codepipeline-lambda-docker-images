@@ -1,0 +1,680 @@
+#  Copyright Amazon.com, Inc. and its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT
+#  
+#  Licensed under the MIT License. See the LICENSE accompanying this file
+#  for the specific language governing permissions and limitations under
+#  the License.
+
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: "AWS::Serverless-2016-10-31"
+Description: "Contains postStateMachine"
+
+Parameters:
+  pDatasetBucket:
+    Description: "The dataset bucket"
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: "/DataLake/S3/CentralBucket"
+  pStageBucket:
+    Description: "The stage bucket"
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: "/DataLake/S3/StageBucket"
+  pApp:
+    Description: "Name of the application (all lowercase, no symbols or spaces)"
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: "/DataLake/Misc/pApp"
+  pOrg:
+    Description: "Name of the organization (all lowercase, no symbols or spaces)"
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: "/DataLake/Misc/pOrg"
+  pTeamName:
+    Description: "Name of the team owning the pipeline (all lowercase, no symbols or spaces)"
+    Type: String
+    AllowedPattern: "[a-z0-9]*"
+  pPipeline:
+    Description: "The name of the pipeline (all lowercase, no symbols or spaces)"
+    Type: String
+    AllowedPattern: "[a-z0-9]*"
+  pEnv:
+    Description: "The name of the environment to deploy the dataset to"
+    Type: String
+    Default: "dev"
+    AllowedValues: [dev, test, prod]
+  pStateMachineExecutionRole:
+    Description: "The Role Arn that the state machines will use for execution"
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: "/DataLake/IAM/StateMachineRoleArn"
+  pEcrImageTag:
+    Description: "ECR Image Tag"
+    Type: String
+    Default: "latest"
+  pPrefix:
+    Description: Common prefix for resource naming
+    Type: String
+    Default: dev
+    AllowedValues: ["dev", "stg", "prod"]
+
+Resources:
+  ######## IAM #########
+  #PostStepRouting Policy
+  rLambdaExecutionPostStepQueueRoutingPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Description: Provisions an IAM Policy which grants permissions to
+    Properties:
+      Description: "This Policy gives permission .Provisioned as part of Request AWS-R0000"
+      #ManagedPolicyName: "LambdaExecutionPostStepQueueRouting-Policy"
+      ManagedPolicyName: !Sub "sdlf-${pTeamName}-${pPipeline}-lambdaexecutionpoststepqueuerouting-policy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # - Effect: Allow
+          #   Action:
+          #     - logs:CreateLogGroup
+          #   Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+          # - Effect: Allow
+          #   Action:
+          #     - "logs:CreateLogStream"
+          #     - "logs:PutLogEvents"
+          #   Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/functionName:*"
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter*
+            Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/DataLake/*"
+          - Effect: Allow
+            Action:
+              - "dynamodb:BatchGet*"
+              - "dynamodb:DescribeTable"
+              - "dynamodb:Get*"
+              - "dynamodb:Query"
+              - "dynamodb:Scan"
+              - "dynamodb:BatchWrite*"
+              - "dynamodb:DeleteItem"
+              - "dynamodb:Update*"
+              - "dynamodb:Put*"
+            Resource:
+              - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/octagon-*"
+          - Effect: Allow
+            Action:
+              - states:StartExecution
+            Resource:
+              - !Ref rStateMachinePost
+          - Effect: Allow
+            Action:
+              - "sqs:List*"
+              - "sqs:ReceiveMessage"
+              - "sqs:SendMessage*"
+              - "sqs:DeleteMessage*"
+              - "sqs:GetQueue*"
+            Resource:
+              #- !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${pOrg}-${pApp}-${pEnv}-${pTeamName}*"
+              #- !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:sdlf-${pTeamName}-${pDatasetName}-${pPipeline}-${pOrg}-${pApp}-${pEnv}*"
+              - !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:sdlf-${pTeamName}*"
+
+  # PostStepRouting Role
+  rRoleLambdaExecutionPostStepQueueRouting:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/state-machine/"
+      RoleName: !Sub "sdlf-${pTeamName}-${pPipeline}-lambdapoststepqueuerouting-svc-role"
+      ManagedPolicyArns:
+        - !Ref rLambdaExecutionPostStepQueueRoutingPolicy
+        - !Ref rLambdaCloudwatchPolicy
+
+  # PostStep1 Policy
+  rLambdaExecutionPostStep1Policy:
+    Type: AWS::IAM::ManagedPolicy
+    Description: Provisions an IAM Policy which grants permissions to
+    Properties:
+      Description: "This Policy gives permission .Provisioned as part of Request AWS-R0000"
+      #ManagedPolicyName: "LambdaExecutionPostStep1-Policy"
+      ManagedPolicyName: !Sub "sdlf-${pTeamName}-${pPipeline}-lambdaexecutionpoststep1-policy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:*
+            Resource: arn:aws:logs:*:*:*
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter*
+            Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/DataLake/*"
+          - Effect: Allow
+            Action:
+              - s3:Get*
+              - s3:GetBucketVersioning
+              - s3:List*
+              - s3:PutObject*
+            Resource:
+              - !Sub "arn:aws:s3:::${pDatasetBucket}"
+              - !Sub "arn:aws:s3:::${pDatasetBucket}/*"
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:GetBucketVersioning
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:aws:s3:::${pDatasetBucket}"
+              - !Sub "arn:aws:s3:::${pDatasetBucket}/*"
+          - Effect: Allow
+            Action:
+              - "dynamodb:BatchGet*"
+              - "dynamodb:DescribeTable"
+              - "dynamodb:Get*"
+              - "dynamodb:Query"
+              - "dynamodb:Scan"
+              - "dynamodb:BatchWrite*"
+              - "dynamodb:Update*"
+              - "dynamodb:Put*"
+            Resource:
+              - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/octagon-*"
+          # Glue jobs dont support resource level limitation
+          - Effect: Allow
+            Action:
+              - glue:GetJobRun
+              - glue:StartJobRun
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - "iam:PassRole"
+              - "iam:GetRole"
+            Resource: "*"
+
+  # PostStep1 Role
+  rRoleLambdaExecutionPostStep1:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/state-machine/"
+      RoleName: !Sub "sdlf-${pTeamName}-${pPipeline}-lambdapoststep1-svc-role"
+      ManagedPolicyArns:
+        - !Ref rLambdaExecutionPostStep1Policy
+        - !Ref rLambdaCloudwatchPolicy
+
+  #lambda cloudwatch logs Policy
+  rLambdaCloudwatchPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Description: Provisions an IAM Policy which grants permissions to cloudwatch logs
+    Properties:
+      Description: "This Policy gives permission .Provisioned as part of Request AWS-R0000"
+      #ManagedPolicyName: "LambdaExecutionPostStep2-Policy"
+      ManagedPolicyName: !Sub "sdlf-${pTeamName}-${pPipeline}-${AWS::StackName}-lambdacloudwatchlogs-policy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+          - Effect: Allow
+            Action:
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            #Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/sdlf-${pTeamName}-${pPipeline}-${pOrg}-${pApp}-${pEnv}*:*"
+            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/sdlf-${pTeamName}*:*"
+
+  #PostStep2 Policy
+  rLambdaExecutionPostStep2Policy:
+    Type: AWS::IAM::ManagedPolicy
+    Description: Provisions an IAM Policy which grants permissions to
+    Properties:
+      Description: "This Policy gives permission .Provisioned as part of Request AWS-R0000"
+      #ManagedPolicyName: "LambdaExecutionPostStep2-Policy"
+      ManagedPolicyName: !Sub "sdlf-${pTeamName}-${pPipeline}-lambdaexecutionpoststep2-policy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:*
+            Resource: arn:aws:logs:*:*:*
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter*
+            Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/DataLake/*"
+          - Effect: Allow
+            Action:
+              - "dynamodb:BatchGet*"
+              - "dynamodb:DescribeTable"
+              - "dynamodb:Get*"
+              - "dynamodb:Query"
+              - "dynamodb:Scan"
+              - "dynamodb:BatchWrite*"
+              - "dynamodb:DeleteItem"
+              - "dynamodb:Update*"
+              - "dynamodb:Put*"
+            Resource:
+              - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/octagon-*"
+          - Effect: Allow
+            Action:
+              - glue:StartCrawler
+            Resource: "*"
+
+  # PostStep2 Role
+  rRoleLambdaExecutionPostStep2:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/state-machine/"
+      RoleName: !Sub "sdlf-${pTeamName}-${pPipeline}-lambdapoststep2-svc-role"
+      ManagedPolicyArns:
+        - !Ref rLambdaExecutionPostStep2Policy
+        - !Ref rLambdaCloudwatchPolicy
+
+  # PostStep3 Policy
+  rLambdaExecutionPostStep3Policy:
+    Type: AWS::IAM::ManagedPolicy
+    Description: Provisions an IAM Policy which grants permissions to
+    Properties:
+      Description: "This Policy gives permission .Provisioned as part of Request AWS-R0000"
+      #ManagedPolicyName: "LambdaExecutionPostStep3-Policy"
+      ManagedPolicyName: !Sub "sdlf-${pTeamName}-${pPipeline}-lambdaexecutionpoststep3-policy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:*
+            Resource: arn:aws:logs:*:*:*
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter*
+            Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/DataLake/*"
+          - Effect: Allow
+            Action:
+              - s3:List*
+            Resource:
+              - !Sub "arn:aws:s3:::${pStageBucket}"
+              - !Sub "arn:aws:s3:::${pStageBucket}/*"
+          - Effect: Allow
+            Action:
+              - "dynamodb:BatchGet*"
+              - "dynamodb:DescribeTable"
+              - "dynamodb:Get*"
+              - "dynamodb:Query"
+              - "dynamodb:Scan"
+              - "dynamodb:BatchWrite*"
+              - "dynamodb:DeleteItem"
+              - "dynamodb:Update*"
+              - "dynamodb:Put*"
+            Resource:
+              - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/octagon-*"
+
+  # PostStep3 Role
+  rRoleLambdaExecutionPostStep3:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/state-machine/"
+      RoleName: !Sub "sdlf-${pTeamName}-${pPipeline}-lambdapoststep3-svc-role"
+      ManagedPolicyArns:
+        - !Ref rLambdaExecutionPostStep3Policy
+        - !Ref rLambdaCloudwatchPolicy
+
+  # Error Handling Lambda Policy
+  rLambdaExecutionPostStepErrorPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Description: Provisions an IAM Policy which grants permissions to
+    Properties:
+      Description: "This Policy gives permission .Provisioned as part of Request AWS-R0000"
+      #ManagedPolicyName: "LambdaExecutionPostStepError-Policy"
+      ManagedPolicyName: !Sub "sdlf-${pTeamName}-${pPipeline}-lambdaexecutionpoststeperror-policy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:*
+            Resource: arn:aws:logs:*:*:*
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter*
+            Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/DataLake/*"
+          - Effect: Allow
+            Action:
+              - "sqs:List*"
+              - "sqs:ReceiveMessage"
+              - "sqs:SendMessage*"
+              - "sqs:DeleteMessage*"
+              - "sqs:GetQueue*"
+            Resource:
+              #- !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:sdlf-${pTeamName}-${pPipeline}-${pOrg}-${pApp}-${pEnv}*"
+              - !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:sdlf-${pTeamName}*"
+
+  # Error Handling Lambda Role
+  rRoleLambdaExecutionPostStepError:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/state-machine/"
+      RoleName: !Sub "sdlf-${pTeamName}-${pPipeline}-lambdapoststeperror-svc-role"
+      ManagedPolicyArns:
+        - !Ref rLambdaExecutionPostStepErrorPolicy
+        - !Ref rLambdaCloudwatchPolicy
+
+  ######## LAMBDA FUNCTIONS #########
+  rLambdaPostRouting:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      PackageType: Image
+      ImageUri: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${pPrefix}-stage-b-routing:${pEcrImageTag}"
+      FunctionName: !Join [
+          "-",
+          [
+            "sdlf",
+            !Ref pTeamName,
+            !Ref pPipeline,
+            !Ref pOrg,
+            !Ref pApp,
+            !Ref pEnv,
+            # !Ref pTeamName,
+            # !Ref pPipeline,
+            "routing-b",
+          ],
+        ]
+      Description: "Checks if items are to be processed and route them to state machine"
+      MemorySize: 256
+      Timeout: 300
+      Role: !GetAtt rRoleLambdaExecutionPostStepQueueRouting.Arn
+
+  rLambdaPostStepRedrive:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      PackageType: Image
+      ImageUri: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${pPrefix}-stage-b-redrive:${pEcrImageTag}"
+      FunctionName: !Join [
+          "-",
+          [
+            "sdlf",
+            !Ref pTeamName,
+            !Ref pPipeline,
+            !Ref pOrg,
+            !Ref pApp,
+            !Ref pEnv,
+            # !Ref pTeamName,
+            # !Ref pPipeline,
+            "redrive-b",
+          ],
+        ]
+      Environment:
+        Variables:
+          TEAM: !Ref pTeamName
+          PIPELINE: !Ref pPipeline
+      Description: "Redrives Failed messages to the routing queue"
+      MemorySize: 256
+      Timeout: 300
+      Role: !GetAtt rRoleLambdaExecutionPostStepQueueRouting.Arn
+
+  rLambdaPostStep1:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      PackageType: Image
+      ImageUri: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${pPrefix}-stage-b-process-data:${pEcrImageTag}"
+      FunctionName: !Join [
+          "-",
+          [
+            "sdlf",
+            !Ref pTeamName,
+            !Ref pPipeline,
+            !Ref pOrg,
+            !Ref pApp,
+            !Ref pEnv,
+            # !Ref pTeamName,
+            # !Ref pPipeline,
+            "process-b",
+          ],
+        ]
+      Description: ""
+      MemorySize: 1536
+      Timeout: 900
+      Role: !GetAtt rRoleLambdaExecutionPostStep1.Arn
+
+  rLambdaJobCheck:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      PackageType: Image
+      ImageUri: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${pPrefix}-stage-b-check-job:${pEcrImageTag}"
+      FunctionName: !Join [
+          "-",
+          [
+            "sdlf",
+            !Ref pTeamName,
+            !Ref pPipeline,
+            !Ref pOrg,
+            !Ref pApp,
+            !Ref pEnv,
+            # !Ref pTeamName,
+            # !Ref pPipeline,
+            "checkjob-b",
+          ],
+        ]
+      Description: "Checks if job has finished (success/failure)"
+      MemorySize: 128
+      Timeout: 300
+      Role: !GetAtt rRoleLambdaExecutionPostStep1.Arn
+
+  rLambdaPostStep2:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      PackageType: Image
+      ImageUri: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${pPrefix}-stage-b-crawl-data:${pEcrImageTag}"
+      FunctionName: !Join [
+          "-",
+          [
+            "sdlf",
+            !Ref pTeamName,
+            !Ref pPipeline,
+            !Ref pOrg,
+            !Ref pApp,
+            !Ref pEnv,
+            # !Ref pTeamName,
+            # !Ref pPipeline,
+            "crawl-b",
+          ],
+        ]
+      Description: "Glue crawler"
+      MemorySize: 128
+      Timeout: 300
+      Role: !GetAtt rRoleLambdaExecutionPostStep2.Arn
+
+  rLambdaPostStep3:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      PackageType: Image
+      ImageUri: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${pPrefix}-stage-b-postupdate-metadata:${pEcrImageTag}"
+      FunctionName: !Join [
+          "-",
+          [
+            "sdlf",
+            !Ref pTeamName,
+            !Ref pPipeline,
+            !Ref pOrg,
+            !Ref pApp,
+            !Ref pEnv,
+            # !Ref pTeamName,
+            # !Ref pPipeline,
+            "postupdate-b",
+          ],
+        ]
+      Description: "Updates the metadata in the DynamoDB table"
+      MemorySize: 128
+      Timeout: 300
+      Role: !GetAtt rRoleLambdaExecutionPostStep3.Arn
+
+  rLambdaPostStepError:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      PackageType: Image
+      ImageUri: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${pPrefix}-stage-b-error:${pEcrImageTag}"
+      FunctionName: !Join [
+          "-",
+          [
+            "sdlf",
+            !Ref pTeamName,
+            !Ref pPipeline,
+            !Ref pOrg,
+            !Ref pApp,
+            !Ref pEnv,
+            # !Ref pTeamName,
+            # !Ref pPipeline,
+            "error-b",
+          ],
+        ]
+      Description: "Fallback lambda to handle messages which failed processing"
+      MemorySize: 256
+      Timeout: 300
+      Role: !GetAtt rRoleLambdaExecutionPostStepError.Arn
+
+  rStateMachinePost:
+    Type: "AWS::StepFunctions::StateMachine"
+    Properties:
+      StateMachineName: !Join [
+          "-",
+          [
+            "sdlf",
+            !Ref pTeamName,
+            !Ref pPipeline,
+            !Ref pOrg,
+            !Ref pApp,
+            !Ref pEnv,
+            # !Ref pTeamName,
+            # !Ref pPipeline,
+            "sm-b",
+          ],
+        ]
+      DefinitionString: !Sub
+        - |-
+          { 
+            "Comment": "Simple pseudo flow",
+            "StartAt": "Try",
+            "States": {
+              "Try": {
+                "Type": "Parallel",
+                "Branches": [
+                  {
+                    "StartAt": "Process Data", 
+                    "States":{
+                      "Process Data": { 
+                        "Type": "Task", 
+                        "Resource": "${lStep1}", 
+                        "Comment": "Process Data", 
+                        "ResultPath": "$.body.job", 
+                        "Next": "Wait" 
+                      }, 
+                      "Wait": { 
+                          "Type": "Wait", 
+                          "Seconds": 15, 
+                          "Next": "Get Job status" 
+                      }, 
+                      "Get Job status": { 
+                          "Type": "Task", 
+                          "Resource": "${lCheckJob}", 
+                          "ResultPath": "$.body.job", 
+                          "Next": "Did Job finish?" 
+                      }, 
+                      "Did Job finish?": { 
+                          "Type": "Choice", 
+                          "Choices": [{ 
+                              "Variable": "$.body.job.jobDetails.jobStatus", 
+                              "StringEquals": "SUCCEEDED", 
+                              "Next": "Run Glue Crawler" 
+                          },{ 
+                              "Variable": "$.body.job.jobDetails.jobStatus", 
+                              "StringEquals": "FAILED", 
+                              "Next": "Job Failed" 
+                          }], 
+                          "Default": "Wait" 
+                      }, 
+                        "Job Failed": { 
+                        "Type": "Fail", 
+                        "Error": "Job Failed", 
+                        "Cause": "Job failed, please check the logs" 
+                      }, 
+                      "Run Glue Crawler": { 
+                        "Type": "Task", 
+                        "Resource": "${lStep2}", 
+                        "Comment": "Run Glue Crawler", 
+                        "ResultPath": "$.statusCode", 
+                        "Next": "Post-update Comprehensive Catalogue" 
+                      }, 
+                      "Post-update Comprehensive Catalogue": { 
+                        "Type": "Task", 
+                        "Resource": "${lStep3}", 
+                        "Comment": "Post-update Comprehensive Catalogue", 
+                        "ResultPath": "$.statusCode", 
+                        "End": true 
+                      }
+                    }
+                  }
+                ],
+                "Catch": [
+                  {
+                    "ErrorEquals": [ "States.ALL" ],
+                    "ResultPath": null,
+                    "Next": "Error"
+                  }
+                ],
+                "Next": "Done"
+              },
+              "Done": { 
+                "Type": "Succeed" 
+              },
+              "Error": {
+                "Type": "Task",
+                "Resource": "${lError}",
+                "Comment": "Send Original Payload to DLQ",
+                "Next": "Failed"
+              },
+              "Failed": {
+                "Type": "Fail"
+              }
+            }
+          }
+        - {
+            lStep1: !GetAtt rLambdaPostStep1.Arn,
+            lStep2: !GetAtt rLambdaPostStep2.Arn,
+            lStep3: !GetAtt rLambdaPostStep3.Arn,
+            lCheckJob: !GetAtt rLambdaJobCheck.Arn,
+            lError: !GetAtt rLambdaPostStepError.Arn,
+          }
+      RoleArn: !Ref pStateMachineExecutionRole
+
+  ######## SSM OUTPUTS #########
+  rStateMachinePostSsm:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/DataLake/SM/${pTeamName}/${pPipeline}PostStageSM"
+      Type: "String"
+      Value: !Ref rStateMachinePost
+      Description: !Sub "ARN of the Post Stage ${pTeamName} ${pPipeline} State Machine"
