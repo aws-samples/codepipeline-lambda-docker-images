@@ -204,7 +204,7 @@ Resources:
             - Name: BuildArtifact
             Name: StageBResources
             OutputArtifacts: []
-            Region: us-east-2
+            Region: !Ref "AWS::Region"
             RunOrder: 1
           - ActionTypeId:
               Category: Deploy
