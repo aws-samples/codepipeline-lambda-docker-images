@@ -69,6 +69,7 @@ Resources:
         deadLetterTargetArn: !GetAtt rDeadLetterQueueRoutingPreStep.Arn
         maxReceiveCount: 1
       VisibilityTimeout: 60
+      KmsMasterKeyId: alias/aws/sqs
   rDeadLetterQueueRoutingPreStep:
     Type: "AWS::SQS::Queue"
     Properties:
@@ -89,6 +90,7 @@ Resources:
       FifoQueue: True
       MessageRetentionPeriod: 1209600
       VisibilityTimeout: 60
+      KmsMasterKeyId: alias/aws/sqs
   rQueuePreStepLambdaEventSourceMapping:
     Type: AWS::Lambda::EventSourceMapping
     Properties:

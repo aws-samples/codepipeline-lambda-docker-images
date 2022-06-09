@@ -137,7 +137,8 @@ Resources:
         deadLetterTargetArn: !GetAtt rDeadLetterQueueRouting.Arn
         maxReceiveCount: 1
       VisibilityTimeout: 60
-      # KmsMasterKeyId: !GetAtt rIamStack.Outputs.oInfrastructureKMSKey
+      SqsManagedSseEnabled: true
+      # KmsMasterKeyId: alias/aws/sqs
 
   rDeadLetterQueueRouting:
     Type: "AWS::SQS::Queue"
@@ -156,6 +157,8 @@ Resources:
         ]
       MessageRetentionPeriod: 1209600
       VisibilityTimeout: 60
+      # KmsMasterKeyId: alias/aws/sqs
+      SqsManagedSseEnabled: true
       # KmsMasterKeyId: !GetAtt rIamStack.Outputs.oInfrastructureKMSKey
 
   rQueueLambdaEventSourceMapping:

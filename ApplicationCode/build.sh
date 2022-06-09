@@ -45,7 +45,7 @@ function build_dockerfiles() {
             docker build --build-arg ECR_COMMON_DATALAKE_REPO_URL=$ECR_COMMON_DATALAKE_REPO_URL . -t $REPOSITORY_URI:latest -t $REPOSITORY_URI:$IMAGE_TAG -t $REPOSITORY_URI:$COMMIT_HASH
             echo Build completed on `date`
             echo Pushing the Docker images...
-            docker push $REPOSITORY_URI
+            docker push --all-tags $REPOSITORY_URI
         cd ../
         echo "---------------------------------------------------------------------------------"
         echo "End creating docker image for $directory..."

@@ -340,6 +340,10 @@ Resources:
     Type: 'AWS::S3::Bucket'
     #DeletionPolicy: Retain
     Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
       Tags:
       - Key: Name
         Value: !Sub "Artifact Store S3 Bucket for CodePipeline in the stack ${AWS::StackName}"
