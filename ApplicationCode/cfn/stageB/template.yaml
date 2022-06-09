@@ -61,20 +61,10 @@ Resources:
     Description: Provisions an IAM Policy which grants permissions to
     Properties:
       Description: "This Policy gives permission .Provisioned as part of Request AWS-R0000"
-      #ManagedPolicyName: "LambdaExecutionPostStepQueueRouting-Policy"
       ManagedPolicyName: !Sub "sdlf-${pTeamName}-${pPipeline}-lambdaexecutionpoststepqueuerouting-policy"
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          # - Effect: Allow
-          #   Action:
-          #     - logs:CreateLogGroup
-          #   Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
-          # - Effect: Allow
-          #   Action:
-          #     - "logs:CreateLogStream"
-          #     - "logs:PutLogEvents"
-          #   Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/functionName:*"
           - Effect: Allow
             Action:
               - ssm:GetParameter*
@@ -105,8 +95,6 @@ Resources:
               - "sqs:DeleteMessage*"
               - "sqs:GetQueue*"
             Resource:
-              #- !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${pOrg}-${pApp}-${pEnv}-${pTeamName}*"
-              #- !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:sdlf-${pTeamName}-${pDatasetName}-${pPipeline}-${pOrg}-${pApp}-${pEnv}*"
               - !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:sdlf-${pTeamName}*"
 
   # PostStepRouting Role
@@ -132,7 +120,6 @@ Resources:
     Description: Provisions an IAM Policy which grants permissions to
     Properties:
       Description: "This Policy gives permission .Provisioned as part of Request AWS-R0000"
-      #ManagedPolicyName: "LambdaExecutionPostStep1-Policy"
       ManagedPolicyName: !Sub "sdlf-${pTeamName}-${pPipeline}-lambdaexecutionpoststep1-policy"
       PolicyDocument:
         Version: "2012-10-17"
@@ -209,8 +196,7 @@ Resources:
     Type: AWS::IAM::ManagedPolicy
     Description: Provisions an IAM Policy which grants permissions to cloudwatch logs
     Properties:
-      Description: "This Policy gives permission .Provisioned as part of Request AWS-R0000"
-      #ManagedPolicyName: "LambdaExecutionPostStep2-Policy"
+      Description: "This Policy gives permission for lambda to publish logs to cloudwatch"
       ManagedPolicyName: !Sub "sdlf-${pTeamName}-${pPipeline}-${AWS::StackName}-lambdacloudwatchlogs-policy"
       PolicyDocument:
         Version: "2012-10-17"
@@ -223,16 +209,14 @@ Resources:
             Action:
               - "logs:CreateLogStream"
               - "logs:PutLogEvents"
-            #Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/sdlf-${pTeamName}-${pPipeline}-${pOrg}-${pApp}-${pEnv}*:*"
             Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/sdlf-${pTeamName}*:*"
 
   #PostStep2 Policy
   rLambdaExecutionPostStep2Policy:
     Type: AWS::IAM::ManagedPolicy
-    Description: Provisions an IAM Policy which grants permissions to
+    Description: Provisions an IAM Policy which grants permissions to Lambda
     Properties:
-      Description: "This Policy gives permission .Provisioned as part of Request AWS-R0000"
-      #ManagedPolicyName: "LambdaExecutionPostStep2-Policy"
+      Description: "This Policy gives permission to Lambda"
       ManagedPolicyName: !Sub "sdlf-${pTeamName}-${pPipeline}-lambdaexecutionpoststep2-policy"
       PolicyDocument:
         Version: "2012-10-17"
@@ -283,10 +267,9 @@ Resources:
   # PostStep3 Policy
   rLambdaExecutionPostStep3Policy:
     Type: AWS::IAM::ManagedPolicy
-    Description: Provisions an IAM Policy which grants permissions to
+    Description: Provisions an IAM Policy which grants permissions to Lambda
     Properties:
-      Description: "This Policy gives permission .Provisioned as part of Request AWS-R0000"
-      #ManagedPolicyName: "LambdaExecutionPostStep3-Policy"
+      Description: "This Policy gives permission to Lambda"
       ManagedPolicyName: !Sub "sdlf-${pTeamName}-${pPipeline}-lambdaexecutionpoststep3-policy"
       PolicyDocument:
         Version: "2012-10-17"
@@ -342,7 +325,6 @@ Resources:
     Description: Provisions an IAM Policy which grants permissions to
     Properties:
       Description: "This Policy gives permission .Provisioned as part of Request AWS-R0000"
-      #ManagedPolicyName: "LambdaExecutionPostStepError-Policy"
       ManagedPolicyName: !Sub "sdlf-${pTeamName}-${pPipeline}-lambdaexecutionpoststeperror-policy"
       PolicyDocument:
         Version: "2012-10-17"
@@ -363,7 +345,6 @@ Resources:
               - "sqs:DeleteMessage*"
               - "sqs:GetQueue*"
             Resource:
-              #- !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:sdlf-${pTeamName}-${pPipeline}-${pOrg}-${pApp}-${pEnv}*"
               - !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:sdlf-${pTeamName}*"
 
   # Error Handling Lambda Role
@@ -398,8 +379,6 @@ Resources:
             !Ref pOrg,
             !Ref pApp,
             !Ref pEnv,
-            # !Ref pTeamName,
-            # !Ref pPipeline,
             "routing-b",
           ],
         ]
@@ -422,8 +401,6 @@ Resources:
             !Ref pOrg,
             !Ref pApp,
             !Ref pEnv,
-            # !Ref pTeamName,
-            # !Ref pPipeline,
             "redrive-b",
           ],
         ]
@@ -450,8 +427,6 @@ Resources:
             !Ref pOrg,
             !Ref pApp,
             !Ref pEnv,
-            # !Ref pTeamName,
-            # !Ref pPipeline,
             "process-b",
           ],
         ]
@@ -474,8 +449,6 @@ Resources:
             !Ref pOrg,
             !Ref pApp,
             !Ref pEnv,
-            # !Ref pTeamName,
-            # !Ref pPipeline,
             "checkjob-b",
           ],
         ]
@@ -498,8 +471,6 @@ Resources:
             !Ref pOrg,
             !Ref pApp,
             !Ref pEnv,
-            # !Ref pTeamName,
-            # !Ref pPipeline,
             "crawl-b",
           ],
         ]
@@ -522,8 +493,6 @@ Resources:
             !Ref pOrg,
             !Ref pApp,
             !Ref pEnv,
-            # !Ref pTeamName,
-            # !Ref pPipeline,
             "postupdate-b",
           ],
         ]
@@ -546,8 +515,6 @@ Resources:
             !Ref pOrg,
             !Ref pApp,
             !Ref pEnv,
-            # !Ref pTeamName,
-            # !Ref pPipeline,
             "error-b",
           ],
         ]
@@ -568,8 +535,6 @@ Resources:
             !Ref pOrg,
             !Ref pApp,
             !Ref pEnv,
-            # !Ref pTeamName,
-            # !Ref pPipeline,
             "sm-b",
           ],
         ]

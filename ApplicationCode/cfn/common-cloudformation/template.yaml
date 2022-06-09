@@ -138,7 +138,6 @@ Resources:
         maxReceiveCount: 1
       VisibilityTimeout: 60
       SqsManagedSseEnabled: true
-      # KmsMasterKeyId: alias/aws/sqs
 
   rDeadLetterQueueRouting:
     Type: "AWS::SQS::Queue"
@@ -157,9 +156,7 @@ Resources:
         ]
       MessageRetentionPeriod: 1209600
       VisibilityTimeout: 60
-      # KmsMasterKeyId: alias/aws/sqs
       SqsManagedSseEnabled: true
-      # KmsMasterKeyId: !GetAtt rIamStack.Outputs.oInfrastructureKMSKey
 
   rQueueLambdaEventSourceMapping:
     Type: AWS::Lambda::EventSourceMapping
@@ -252,7 +249,6 @@ Resources:
       SSESpecification:
         SSEEnabled: "true"
         SSEType: KMS
-        # KMSMasterKeyId: !Ref pKmsKeyArn
       KeySchema:
         - AttributeName: name
           KeyType: HASH
@@ -268,7 +264,6 @@ Resources:
     Type: AWS::DynamoDB::Table
     Properties:
       SSESpecification:
-        # KMSMasterKeyId: !Ref pKmsKeyArn
         SSEEnabled: "true"
         SSEType: KMS
       BillingMode: PAY_PER_REQUEST
@@ -433,14 +428,12 @@ Resources:
               - "dynamodb:Scan"
             Resource: 
               - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/octagon-*"
-          # Circular dependency to rKMSKey
           - Effect: Allow
             Action:
               - "kms:Encrypt"
               - "kms:Decrypt"
             Resource: 
               - !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*'
-              # - !GetAtt rKMSKey.Arn
 
   rStatesExecutionRole:
     Type: "AWS::IAM::Role"

@@ -282,7 +282,6 @@ Resources:
               AWS: !Split
                 - ','
                 - !Sub '${rCodeBuildRole.Arn},${rCodePipelineServiceRole.Arn}'
-                # - !Sub '${pProdAccountAssumeRoleARN},${rCodeBuildRole.Arn},${rCodePipelineServiceRole.Arn}'
             Resource:
               - !Sub 'arn:aws:s3:::${rCodePipelineArtifactStoreBucket}'
               - !Sub 'arn:aws:s3:::${rCodePipelineArtifactStoreBucket}/*'
@@ -820,8 +819,6 @@ Resources:
               - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*"
               - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*"
               - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:userDefinedFunction/*"
-
-          # Needs * in resource - cant restrict    
           - Action:
               - 'glue:CreateSecurityConfiguration'
               - 'glue:GetSecurityConfiguration'
@@ -865,8 +862,6 @@ Resources:
               - 'ssm:GetParameter'
             Effect: Allow
             Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/DataLake/*"
-          #  Is there anyway we can trim this back at all? "DeleteBucket" on "*" is very dangerous. Or we can put our "Guard Rails" Policy on the Roles to
-          #   not allow delete on our "protected" S3 Buckets for Logging/Auditing
           - Action:
               - 's3:ListBuckets'
               - 's3:ListBucket'
